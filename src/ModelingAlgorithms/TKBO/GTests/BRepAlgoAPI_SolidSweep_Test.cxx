@@ -13,6 +13,7 @@
 
 #include <gtest/gtest.h>
 
+#include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_SolidSweep.hxx>
@@ -29,6 +30,7 @@
 #include <GProp_GProps.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shell.hxx>
 #include <TopoDS_Solid.hxx>
@@ -262,6 +264,98 @@ TEST(BRepAlgoAPI_SolidSweepTest, CylinderAlongCrossingPolyline)
     }
   }
   EXPECT_EQ(aHorizontalFaces, 2);
+}
+
+TEST(BRepAlgoAPI_SolidSweepTest, TiltedCylinderAlongHelix)
+{
+  const double       aPi   = std::acos(-1.0);
+  const double       aTilt = 25.0 * aPi / 180.0;
+  const gp_Dir       aBodyAxis(std::sin(aTilt), 0.0, std::cos(aTilt));
+  const gp_Ax1       aPathAxis(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
+  const TopoDS_Solid aBody =
+    BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(8.0, 0.0, 0.0), aBodyAxis), 2.0, 3.0).Solid();
+
+  const TopoDS_Solid aHalfTurn =
+    BRepAlgoAPI_SolidSweep::Sweep(aBody,
+                                  BRepAlgoAPI_SolidSweep::HelicalTranslation{aPathAxis, aPi, 16.0});
+  ASSERT_FALSE(aHalfTurn.IsNull());
+  ASSERT_TRUE(BRepCheck_Analyzer(aHalfTurn).IsValid());
+  GProp_GProps aHalfTurnProperties;
+  BRepGProp::VolumeProperties(aHalfTurn, aHalfTurnProperties);
+  EXPECT_NEAR(aHalfTurnProperties.Mass(), 386.521, 0.01); // Standalone prototype baseline.
+
+  const TopoDS_Solid aLongSweep = BRepAlgoAPI_SolidSweep::Sweep(
+    aBody,
+    BRepAlgoAPI_SolidSweep::HelicalTranslation{aPathAxis, 2.5 * aPi, 16.0});
+  ASSERT_FALSE(aLongSweep.IsNull());
+  ASSERT_TRUE(BRepCheck_Analyzer(aLongSweep).IsValid());
+  GProp_GProps aLongSweepProperties;
+  BRepGProp::VolumeProperties(aLongSweep, aLongSweepProperties);
+  EXPECT_GT(aLongSweepProperties.Mass(), 2.0 * aHalfTurnProperties.Mass());
+
+  // The center at 405 degrees lies beyond the first turn.
+  const double                aStation = 2.25 * aPi;
+  const gp_Pnt                aBase(8.0 * std::cos(aStation), 8.0 * std::sin(aStation), 18.0);
+  const gp_Pnt                aCenter = aBase.Translated(1.5 * gp_Vec(aBodyAxis));
+  BRepClass3d_SolidClassifier aClassifier(aLongSweep, aCenter, 1.0e-7);
+  EXPECT_EQ(aClassifier.State(), TopAbs_IN);
+}
+
+TEST(BRepAlgoAPI_SolidSweepTest, UprightNonOverlappingHelixUsesOneSpan)
+{
+  const double       aPi = std::acos(-1.0);
+  const gp_Ax1       aPathAxis(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
+  const TopoDS_Solid aBody =
+    BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(8.0, 0.0, 0.0), aPathAxis.Direction()), 2.0, 3.0)
+      .Solid();
+  const TopoDS_Solid aResult = BRepAlgoAPI_SolidSweep::Sweep(
+    aBody,
+    BRepAlgoAPI_SolidSweep::HelicalTranslation{aPathAxis, 2.5 * aPi, 16.0});
+  ASSERT_FALSE(aResult.IsNull());
+  ASSERT_TRUE(BRepCheck_Analyzer(aResult).IsValid());
+
+  int aFaceCount = 0;
+  for (TopExp_Explorer aFace(aResult, TopAbs_FACE); aFace.More(); aFace.Next())
+  {
+    ++aFaceCount;
+  }
+  EXPECT_EQ(aFaceCount, 10); // Six envelope patches and four endpoint faces.
+
+  GProp_GProps aProperties;
+  BRepGProp::VolumeProperties(aResult, aProperties, 1.0e-9);
+  EXPECT_NEAR(aProperties.Mass(), 332.0 * aPi, 0.002);
+}
+
+TEST(BRepAlgoAPI_SolidSweepTest, OverlappingHelixHasNoHalfTurnSection)
+{
+  const double       aPi = std::acos(-1.0);
+  const gp_Ax1       aPathAxis(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
+  const TopoDS_Solid aBody =
+    BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(8.0, 0.0, 0.0), aPathAxis.Direction()), 2.0, 3.0)
+      .Solid();
+  const TopoDS_Solid aResult = BRepAlgoAPI_SolidSweep::Sweep(
+    aBody,
+    BRepAlgoAPI_SolidSweep::HelicalTranslation{aPathAxis, 2.5 * aPi, 2.0});
+  ASSERT_FALSE(aResult.IsNull());
+  ASSERT_TRUE(BRepCheck_Analyzer(aResult).IsValid());
+
+  // At the old artificial half-turn cut, both cap rings were on the left.
+  for (TopExp_Explorer anEdge(aResult, TopAbs_EDGE); anEdge.More(); anEdge.Next())
+  {
+    const BRepAdaptor_Curve aCurve(TopoDS::Edge(anEdge.Current()));
+    const double            aFirst  = aCurve.FirstParameter();
+    const double            aLength = aCurve.LastParameter() - aFirst;
+    for (const double aLevel : {1.0, 4.0})
+    {
+      bool isSection = true;
+      for (const double aFraction : {0.25, 0.5, 0.75})
+      {
+        const gp_Pnt aPoint = aCurve.Value(aFirst + aFraction * aLength);
+        isSection = isSection && aPoint.X() < -5.5 && std::abs(aPoint.Z() - aLevel) < 1.0e-6;
+      }
+      EXPECT_FALSE(isSection);
+    }
+  }
 }
 
 TEST(BRepAlgoAPI_SolidSweepTest, CylinderAlongQuarterCircle)

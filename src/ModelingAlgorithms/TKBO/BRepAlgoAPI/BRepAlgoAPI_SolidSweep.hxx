@@ -31,6 +31,15 @@ public:
     double Angle = 0.0; //!< Signed angle in radians.
   };
 
+  //! Helical translation around a world-space axis with fixed body orientation.
+  struct HelicalTranslation
+  {
+    gp_Ax1 Axis;
+    double Angle            = 0.0;    //!< Signed angle in radians.
+    double AdvancePerTurn   = 0.0;    //!< Axial advance along Axis per revolution of travel.
+    double SurfaceTolerance = 1.0e-5; //!< Target sampled deviation in model units.
+  };
+
   //! Sweeps a valid solid along a straight translation.
   //! Supports planar-faced solids and full right circular cylinders.
   //! Other cases raise Standard_ConstructionError.
@@ -48,6 +57,10 @@ public:
   //! and signed angles in [-pi, pi]. Other cases raise Standard_ConstructionError.
   Standard_EXPORT static TopoDS_Solid Sweep(const TopoDS_Solid&        theSolid,
                                             const CircularTranslation& theMotion);
+  //! Builds smooth envelope patches for a full right circular cylinder on a helix.
+  //! Raises Standard_ConstructionError if a valid swept solid cannot be built.
+  Standard_EXPORT static TopoDS_Solid Sweep(const TopoDS_Solid&       theSolid,
+                                            const HelicalTranslation& theMotion);
 };
 
 #endif

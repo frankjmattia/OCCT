@@ -16,28 +16,43 @@
 
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
+#include <BRepBuilderAPI_MakeSolid.hxx>
+#include <BRepBuilderAPI_MakeWire.hxx>
+#include <BRepBuilderAPI_Sewing.hxx>
+#include <BRepCheck_Analyzer.hxx>
+#include <BRepLib.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
+#include <Geom_BSplineSurface.hxx>
+#include <NCollection_Array1.hxx>
+#include <NCollection_Array2.hxx>
 #include <NCollection_List.hxx>
 #include <Precision.hxx>
+#include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <Standard_ConstructionError.hxx>
+#include <Standard_Failure.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
+#include <TopoDS_Shell.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
+#include <gp_Circ.hxx>
 #include <gp_Cylinder.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <vector>
 
 namespace
 {
@@ -176,6 +191,387 @@ TopoDS_Solid BRepAlgoAPI_SolidSweep::Sweep(const TopoDS_Solid& theSolid,
   }
 
   return FuseSweep(theSolid, aTools);
+}
+
+namespace
+{
+struct HelixFrame
+{
+  gp_Pnt                base;
+  gp_Vec                velocity;
+  std::array<gp_Vec, 5> normal;
+  std::array<gp_Vec, 5> derivative;
+};
+
+struct HelixControl
+{
+  gp_Pnt point;
+  gp_Vec derivative;
+};
+
+// The two silhouette lines and the two contributing cap semicircles use
+// the same Hermite interpolation along the helix, so adjacent patches share
+// the same fitted edge. Each semicircle is represented by two rational quarters.
+struct HelixSpan
+{
+  const CylinderGeometry& Cylinder;
+  gp_Vec                  Radial;
+  gp_Vec                  Tangent;
+  gp_Vec                  Advance;
+  double                  Begin;
+  double                  End;
+  bool                    PositiveAxial;
+  int                     Intervals = 0;
+  double                  Step      = 0.0;
+
+  HelixFrame                       frameAt(double t) const;
+  HelixControl                     controlAt(const HelixFrame& frame, int patch, int index) const;
+  occ::handle<Geom_BSplineSurface> makePatch(int patch) const;
+  gp_Pnt       analyticPoint(const HelixFrame& frame, int patch, double u) const;
+  void         addEndpoint(BRepBuilderAPI_Sewing& sewing, const HelixFrame& frame, bool last) const;
+  TopoDS_Solid build(double tolerance);
+};
+
+HelixFrame HelixSpan::frameAt(double t) const
+{
+  const double angle        = Begin + t;
+  const gp_Vec radial       = std::cos(angle) * Radial + std::sin(angle) * Tangent;
+  const gp_Pnt base         = Cylinder.Base.Translated(radial - Radial + angle * Advance);
+  const gp_Vec velocity     = -std::sin(angle) * Radial + std::cos(angle) * Tangent + Advance;
+  const gp_Vec acceleration = -radial;
+  const gp_Vec axis(Cylinder.Axis);
+  const gp_Vec transverse = velocity - velocity.Dot(axis) * axis;
+  if (transverse.Magnitude() <= Precision::Confusion())
+  {
+    throw Standard_ConstructionError("Helical sweep has an undefined lateral silhouette");
+  }
+  const gp_Vec transverseDerivative = acceleration - acceleration.Dot(axis) * axis;
+  const gp_Vec u                    = transverse.Normalized();
+  const gp_Vec du =
+    (transverseDerivative - u.Dot(transverseDerivative) * u) / transverse.Magnitude();
+  const gp_Vec w  = axis.Crossed(u);
+  const gp_Vec dw = axis.Crossed(du);
+  return {base, velocity, {u, w, -u, -w, u}, {du, dw, -du, -dw, du}};
+}
+
+HelixControl HelixSpan::controlAt(const HelixFrame& frame, int patch, int index) const
+{
+  gp_Vec direction;
+  gp_Vec derivative;
+  double elevation;
+  if (patch < 4)
+  {
+    direction  = frame.normal[patch + (index == 3 ? 1 : 0)];
+    derivative = frame.derivative[patch + (index == 3 ? 1 : 0)];
+    if (index == 2)
+    {
+      direction += frame.normal[patch + 1];
+      derivative += frame.derivative[patch + 1];
+    }
+    elevation = ((patch == 0 || patch == 3) == PositiveAxial) ? 0.0 : Cylinder.Height;
+  }
+  else
+  {
+    const int seam = patch == 4 ? 1 : 3;
+    direction      = frame.normal[seam];
+    derivative     = frame.derivative[seam];
+    elevation      = index == 1 ? 0.0 : Cylinder.Height;
+  }
+  return {frame.base.Translated(Cylinder.Radius * direction + elevation * gp_Vec(Cylinder.Axis)),
+          frame.velocity + Cylinder.Radius * derivative};
+}
+
+occ::handle<Geom_BSplineSurface> HelixSpan::makePatch(int patch) const
+{
+  const int                  degree = patch < 4 ? 2 : 1;
+  NCollection_Array2<gp_Pnt> poles(1, degree + 1, 1, 3 * Intervals + 1);
+  NCollection_Array2<double> weights(1, degree + 1, 1, 3 * Intervals + 1);
+  NCollection_Array1<double> uk(1, 2), vk(1, Intervals + 1);
+  NCollection_Array1<int>    um(1, 2), vm(1, Intervals + 1);
+  uk(1) = 0.0;
+  uk(2) = 1.0;
+  um.Init(degree + 1);
+  for (int i = 0; i <= Intervals; ++i)
+  {
+    vk(i + 1) = i * Step;
+    vm(i + 1) = (i == 0 || i == Intervals) ? 4 : 3;
+  }
+  for (int leg = 0; leg < Intervals; ++leg)
+  {
+    const HelixFrame start = frameAt(leg * Step);
+    const HelixFrame end   = frameAt((leg + 1) * Step);
+    for (int i = 1; i <= degree + 1; ++i)
+    {
+      const HelixControl first  = controlAt(start, patch, i);
+      const HelixControl last   = controlAt(end, patch, i);
+      const int          column = 3 * leg + 1;
+      poles(i, column)          = first.point;
+      poles(i, column + 1)      = first.point.Translated((Step / 3.0) * first.derivative);
+      poles(i, column + 2)      = last.point.Translated((-Step / 3.0) * last.derivative);
+      poles(i, column + 3)      = last.point;
+      const double weight       = degree == 2 && i == 2 ? std::sqrt(0.5) : 1.0;
+      for (int sample = 0; sample < 4; ++sample)
+        weights(i, column + sample) = weight;
+    }
+  }
+  return new Geom_BSplineSurface(poles, weights, uk, vk, um, vm, degree, 3);
+}
+
+gp_Pnt HelixSpan::analyticPoint(const HelixFrame& frame, int patch, double u) const
+{
+  if (patch >= 4)
+  {
+    const HelixControl first = controlAt(frame, patch, 1);
+    return first.point.Translated((u * Cylinder.Height) * gp_Vec(Cylinder.Axis));
+  }
+  const double b0 = (1.0 - u) * (1.0 - u);
+  const double b1 = std::sqrt(2.0) * u * (1.0 - u);
+  const double b2 = u * u;
+  return gp_Pnt((b0 * controlAt(frame, patch, 1).point.XYZ()
+                 + b1 * controlAt(frame, patch, 2).point.XYZ()
+                 + b2 * controlAt(frame, patch, 3).point.XYZ())
+                / (b0 + b1 + b2));
+}
+
+void HelixSpan::addEndpoint(BRepBuilderAPI_Sewing& sewing, const HelixFrame& frame, bool last) const
+{
+  const double            pi        = std::acos(-1.0);
+  const gp_Dir&           direction = Cylinder.Axis;
+  const gp_Dir            x(frame.normal[0]);
+  const gp_Cylinder       cylinder(gp_Ax3(frame.base, direction, x), Cylinder.Radius);
+  BRepBuilderAPI_MakeFace side(cylinder,
+                               last ? -pi / 2.0 : pi / 2.0,
+                               last ? pi / 2.0 : 3.0 * pi / 2.0,
+                               0.0,
+                               Cylinder.Height);
+  sewing.Add(side.Face());
+  const gp_Pnt capCenter =
+    frame.base.Translated(last == PositiveAxial ? Cylinder.Height * gp_Vec(direction) : gp_Vec());
+  BRepBuilderAPI_MakeEdge rim(gp_Circ(gp_Ax2(capCenter, direction, x), Cylinder.Radius));
+  BRepBuilderAPI_MakeWire outline(rim.Edge());
+  BRepBuilderAPI_MakeFace cap(outline.Wire());
+  sewing.Add(cap.Face());
+}
+
+TopoDS_Solid HelixSpan::build(double tolerance)
+{
+  const double length = End - Begin;
+  Intervals           = std::max(2, static_cast<int>(std::ceil(length / 0.08)));
+  std::array<occ::handle<Geom_BSplineSurface>, 6> surfaces;
+  for (;;)
+  {
+    Step             = length / Intervals;
+    double deviation = 0.0;
+    for (int patch = 0; patch < 6; ++patch)
+    {
+      surfaces[patch] = makePatch(patch);
+      for (int interval = 0; interval < Intervals; ++interval)
+      {
+        for (const double fraction : {0.25, 0.5, 0.75})
+        {
+          const double     t     = (interval + fraction) * Step;
+          const HelixFrame frame = frameAt(t);
+          for (int i = 0; i <= 8; ++i)
+          {
+            const double u = i / 8.0;
+            deviation =
+              std::max(deviation,
+                       analyticPoint(frame, patch, u).Distance(surfaces[patch]->Value(u, t)));
+          }
+        }
+      }
+    }
+    if (deviation <= tolerance)
+    {
+      break;
+    }
+    if (Intervals >= 1024)
+    {
+      throw Standard_ConstructionError("Helical envelope did not reach the fitting tolerance");
+    }
+    Intervals *= 2;
+  }
+
+  BRepBuilderAPI_Sewing sewing(10.0 * Precision::Confusion());
+  for (const auto& surface : surfaces)
+  {
+    BRepBuilderAPI_MakeFace face(surface, Precision::Confusion());
+    if (!face.IsDone())
+    {
+      throw Standard_ConstructionError("Unable to build a helical envelope face");
+    }
+    sewing.Add(face.Face());
+  }
+  addEndpoint(sewing, frameAt(0.0), false);
+  addEndpoint(sewing, frameAt(length), true);
+  sewing.Perform();
+  const TopoDS_Shape& shell = sewing.SewedShape();
+  if (shell.IsNull() || shell.ShapeType() != TopAbs_SHELL || sewing.NbFreeEdges() != 0)
+  {
+    throw Standard_ConstructionError("Helical envelope did not close");
+  }
+  TopoDS_Solid result = BRepBuilderAPI_MakeSolid(TopoDS::Shell(shell)).Solid();
+  if (!BRepLib::OrientClosedSolid(result) || !BRepCheck_Analyzer(result).IsValid())
+  {
+    throw Standard_ConstructionError("Helical envelope did not produce a valid solid");
+  }
+  return result;
+}
+} // namespace
+
+TopoDS_Solid BRepAlgoAPI_SolidSweep::Sweep(const TopoDS_Solid&       theSolid,
+                                           const HelicalTranslation& theMotion)
+{
+  if (!std::isfinite(theMotion.Angle) || !std::isfinite(theMotion.AdvancePerTurn)
+      || !std::isfinite(theMotion.SurfaceTolerance) || theMotion.SurfaceTolerance <= 0.0)
+  {
+    throw Standard_ConstructionError("Expected finite helix parameters and positive fit tolerance");
+  }
+
+  const CylinderGeometry cylinder = ReadCylinder(theSolid);
+  const double           angle    = std::abs(theMotion.Angle);
+  if (angle <= Precision::Angular())
+  {
+    return theSolid;
+  }
+
+  const double pi       = std::acos(-1.0);
+  const double fullTurn = 2.0 * pi;
+  const gp_Vec pathAxis(theMotion.Axis.Direction());
+  const gp_Vec fromAxis(theMotion.Axis.Location(), cylinder.Base);
+  const gp_Vec radial  = fromAxis - fromAxis.Dot(pathAxis) * pathAxis;
+  const gp_Vec advance = (theMotion.AdvancePerTurn / fullTurn) * pathAxis;
+  if (radial.Magnitude() <= Precision::Confusion())
+  {
+    return Sweep(theSolid, angle * advance);
+  }
+  const gp_Vec tangent = (theMotion.Angle < 0.0 ? -1.0 : 1.0) * pathAxis.Crossed(radial);
+  const gp_Vec axis(cylinder.Axis);
+
+  // The axial velocity is a sinusoid plus a constant. Its sign determines
+  // which half of each cap rim contributes to the envelope.
+  const double cosine    = tangent.Dot(axis);
+  const double sine      = -radial.Dot(axis);
+  const double constant  = advance.Dot(axis);
+  const double amplitude = std::hypot(cosine, sine);
+  if (amplitude <= Precision::Confusion() && std::abs(constant) <= Precision::Confusion())
+  {
+    throw Standard_ConstructionError("Helical envelope requires axial motion on each span");
+  }
+
+  std::vector<double> boundaries{0.0, angle};
+  const double        aPathRadius  = radial.Magnitude();
+  const double        anExtraAngle = angle - fullTurn;
+  // For parallel axes and a partial second turn, put the two temporary
+  // section cuts in the repeated azimuth range if the middle cell can still
+  // leave enough angular clearance between its endpoint cylinders.
+  const bool useOverlapCuts =
+    cylinder.Axis.IsParallel(theMotion.Axis.Direction(), Precision::Angular())
+    && std::abs(theMotion.AdvancePerTurn) < cylinder.Height && cylinder.Radius < aPathRadius
+    && anExtraAngle > 0.0 && anExtraAngle < pi
+    && 0.6 * anExtraAngle > 2.0 * std::asin(cylinder.Radius / aPathRadius);
+  if (amplitude > std::abs(constant))
+  {
+    const double phase = std::atan2(sine, cosine);
+    const double root  = std::acos(-constant / amplitude);
+    for (const double offset : {phase - root, phase + root})
+    {
+      for (double t = offset + fullTurn * std::ceil(-offset / fullTurn); t < angle; t += fullTurn)
+      {
+        if (t > Precision::Angular() && angle - t > Precision::Angular())
+        {
+          boundaries.push_back(t);
+        }
+      }
+    }
+  }
+  const auto buildSweep = [&](std::vector<double> theBoundaries, bool theSimplify) {
+    std::sort(theBoundaries.begin(), theBoundaries.end());
+    TopoDS_Solid                   firstSpan;
+    NCollection_List<TopoDS_Shape> otherSpans;
+    for (std::size_t i = 1; i < theBoundaries.size(); ++i)
+    {
+      const double begin = theBoundaries[i - 1];
+      const double end   = theBoundaries[i];
+      if (end - begin <= Precision::Angular())
+      {
+        continue;
+      }
+      const double middle   = 0.5 * (begin + end);
+      const bool   positive = cosine * std::cos(middle) + sine * std::sin(middle) + constant > 0.0;
+      HelixSpan    span{cylinder, radial, tangent, advance, begin, end, positive};
+      const TopoDS_Solid sweptSpan = span.build(theMotion.SurfaceTolerance);
+      if (firstSpan.IsNull())
+      {
+        firstSpan = sweptSpan;
+      }
+      else
+      {
+        otherSpans.Append(sweptSpan);
+      }
+    }
+    const TopoDS_Solid result = FuseSweep(firstSpan, otherSpans, theSimplify);
+    if (result.IsNull() || !BRepCheck_Analyzer(result).IsValid())
+    {
+      throw Standard_ConstructionError("Helical sweep union is invalid");
+    }
+    return result;
+  };
+
+  // For parallel axes, each horizontal slice sees an arc shorter than half
+  // a turn when the advance exceeds twice the height. With positive inner
+  // radius, those slice envelopes do not require overlap trimming.
+  if (cylinder.Axis.IsParallel(theMotion.Axis.Direction(), Precision::Angular())
+      && std::abs(theMotion.AdvancePerTurn) > 2.0 * cylinder.Height
+      && aPathRadius - cylinder.Radius > Precision::Confusion())
+  {
+    try
+    {
+      return buildSweep({0.0, angle}, false);
+    }
+    catch (const Standard_Failure&)
+    {
+      // Retain the existing split construction if the continuous shell fails.
+    }
+  }
+
+  if (useOverlapCuts)
+  {
+    TopoDS_Solid aResult;
+    try
+    {
+      aResult = buildSweep({0.0, 0.8 * anExtraAngle, fullTurn + 0.2 * anExtraAngle, angle}, false);
+    }
+    catch (const Standard_Failure&)
+    {
+      // Retry with the regular half-turn cuts if the longer middle cell fails.
+    }
+    if (!aResult.IsNull())
+    {
+      try
+      {
+        ShapeUpgrade_UnifySameDomain aCleanup(aResult);
+        aCleanup.SetSafeInputMode(true);
+        aCleanup.Build();
+        const TopoDS_Shape& aCleaned = aCleanup.Shape();
+        if (!aCleaned.IsNull() && aCleaned.ShapeType() == TopAbs_SOLID
+            && BRepCheck_Analyzer(aCleaned).IsValid())
+        {
+          return TopoDS::Solid(aCleaned);
+        }
+      }
+      catch (const Standard_Failure&)
+      {
+        // Preserve the valid Boolean result if cleanup encounters a bad trim.
+      }
+      return aResult;
+    }
+  }
+  for (double t = pi; t < angle; t += pi)
+  {
+    boundaries.push_back(t);
+  }
+  return buildSweep(boundaries, true);
 }
 
 TopoDS_Solid BRepAlgoAPI_SolidSweep::Sweep(const TopoDS_Solid&                 theSolid,

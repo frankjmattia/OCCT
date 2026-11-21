@@ -20,6 +20,8 @@ set(OCCT_BRepAlgoAPI_FILES
   BRepAlgoAPI_Fuse.hxx
   BRepAlgoAPI_Section.cxx
   BRepAlgoAPI_Section.hxx
+  BRepAlgoAPI_SolidSweep.cxx
+  BRepAlgoAPI_SolidSweep.hxx
   BRepAlgoAPI_Splitter.cxx
   BRepAlgoAPI_Splitter.hxx
 )

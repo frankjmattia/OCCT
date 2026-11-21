@@ -12,7 +12,7 @@
 // Alternatively, this file may be used under the terms of Open CASCADE
 // commercial license or contractual agreement.
 
-#include <BRepAlgoAPI_SolidSweep.hxx>
+#include <BRepSolidSweep_Sweep.hxx>
 
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
@@ -28,7 +28,10 @@
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
+#include <GC_MakeSegment2d.hxx>
+#include <Geom2d_TrimmedCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
+#include <Geom_CylindricalSurface.hxx>
 #include <NCollection_Array1.hxx>
 #include <NCollection_Array2.hxx>
 #include <NCollection_List.hxx>
@@ -123,7 +126,7 @@ TopoDS_Solid     SweepCylinderTransversely(const TopoDS_Solid& theCylinder,
                                            const gp_Vec&       theTranslation);
 } // namespace
 
-TopoDS_Solid BRepAlgoAPI_SolidSweep::Sweep(const TopoDS_Solid& theSolid,
+TopoDS_Solid BRepSolidSweep_Sweep::Sweep(const TopoDS_Solid& theSolid,
                                            const gp_Vec&       theTranslation)
 {
   if (theSolid.IsNull() || !IsFinite(theTranslation))
@@ -229,7 +232,8 @@ struct HelixSpan
   occ::handle<Geom_BSplineSurface> makePatch(int patch) const;
   gp_Pnt       analyticPoint(const HelixFrame& frame, int patch, double u) const;
   void         addEndpoint(BRepBuilderAPI_Sewing& sewing, const HelixFrame& frame, bool last) const;
-  TopoDS_Solid build(double tolerance);
+  TopoDS_Face  uprightWall(double theRadius) const;
+  TopoDS_Solid build(double tolerance, bool theExactWalls);
 };
 
 HelixFrame HelixSpan::frameAt(double t) const
@@ -353,16 +357,53 @@ void HelixSpan::addEndpoint(BRepBuilderAPI_Sewing& sewing, const HelixFrame& fra
   sewing.Add(cap.Face());
 }
 
-TopoDS_Solid HelixSpan::build(double tolerance)
+TopoDS_Face HelixSpan::uprightWall(double theRadius) const
+{
+  const gp_Dir                               aSpinAxis(Radial.Crossed(Tangent));
+  const gp_Pnt                               anOrigin = Cylinder.Base.Translated(-Radial);
+  const occ::handle<Geom_CylindricalSurface> aSurface =
+    new Geom_CylindricalSurface(gp_Ax3(anOrigin, aSpinAxis, gp_Dir(Radial)), theRadius);
+
+  // The helical edges are straight in the unwrapped cylinder parameters.
+  const gp_Vec                  anAxis(aSpinAxis);
+  const double                  aRise   = Advance.Dot(anAxis);
+  const double                  aHeight = Cylinder.Height * gp_Vec(Cylinder.Axis).Dot(anAxis);
+  const double                  aLow    = std::min(0.0, aHeight);
+  const double                  aHigh   = std::max(0.0, aHeight);
+  const std::array<gp_Pnt2d, 4> aCorners{gp_Pnt2d(Begin, Begin * aRise + aLow),
+                                         gp_Pnt2d(End, End * aRise + aLow),
+                                         gp_Pnt2d(End, End * aRise + aHigh),
+                                         gp_Pnt2d(Begin, Begin * aRise + aHigh)};
+  BRepBuilderAPI_MakeWire       aWire;
+  for (std::size_t i = 0; i < aCorners.size(); ++i)
+  {
+    GC_MakeSegment2d        aSegment(aCorners[i], aCorners[(i + 1) % aCorners.size()]);
+    BRepBuilderAPI_MakeEdge anEdge(aSegment.Value(), aSurface);
+    aWire.Add(anEdge.Edge());
+  }
+  BRepBuilderAPI_MakeFace aFace(aSurface, aWire.Wire());
+  if (!aFace.IsDone() || !BRepLib::BuildCurves3d(aFace.Face(), Precision::Confusion()))
+  {
+    throw Standard_ConstructionError("Unable to build a trimmed cylindrical envelope wall");
+  }
+  return aFace.Face();
+}
+
+TopoDS_Solid HelixSpan::build(double tolerance, bool theExactWalls)
 {
   const double length = End - Begin;
   Intervals           = std::max(2, static_cast<int>(std::ceil(length / 0.08)));
   std::array<occ::handle<Geom_BSplineSurface>, 6> surfaces;
+  const int                                       aPatchCount = theExactWalls ? 4 : 6;
+  if (theExactWalls)
+  {
+    tolerance = std::min(tolerance, Precision::Confusion());
+  }
   for (;;)
   {
     Step             = length / Intervals;
     double deviation = 0.0;
-    for (int patch = 0; patch < 6; ++patch)
+    for (int patch = 0; patch < aPatchCount; ++patch)
     {
       surfaces[patch] = makePatch(patch);
       for (int interval = 0; interval < Intervals; ++interval)
@@ -393,14 +434,20 @@ TopoDS_Solid HelixSpan::build(double tolerance)
   }
 
   BRepBuilderAPI_Sewing sewing(10.0 * Precision::Confusion());
-  for (const auto& surface : surfaces)
+  for (int patch = 0; patch < aPatchCount; ++patch)
   {
-    BRepBuilderAPI_MakeFace face(surface, Precision::Confusion());
+    BRepBuilderAPI_MakeFace face(surfaces[patch], Precision::Confusion());
     if (!face.IsDone())
     {
       throw Standard_ConstructionError("Unable to build a helical envelope face");
     }
     sewing.Add(face.Face());
+  }
+  if (theExactWalls)
+  {
+    const double aPathRadius = Radial.Magnitude();
+    sewing.Add(uprightWall(aPathRadius - Cylinder.Radius));
+    sewing.Add(uprightWall(aPathRadius + Cylinder.Radius));
   }
   addEndpoint(sewing, frameAt(0.0), false);
   addEndpoint(sewing, frameAt(length), true);
@@ -419,7 +466,7 @@ TopoDS_Solid HelixSpan::build(double tolerance)
 }
 } // namespace
 
-TopoDS_Solid BRepAlgoAPI_SolidSweep::Sweep(const TopoDS_Solid&       theSolid,
+TopoDS_Solid BRepSolidSweep_Sweep::Sweep(const TopoDS_Solid&       theSolid,
                                            const HelicalTranslation& theMotion)
 {
   if (!std::isfinite(theMotion.Angle) || !std::isfinite(theMotion.AdvancePerTurn)
@@ -485,38 +532,39 @@ TopoDS_Solid BRepAlgoAPI_SolidSweep::Sweep(const TopoDS_Solid&       theSolid,
       }
     }
   }
-  const auto buildSweep = [&](std::vector<double> theBoundaries, bool theSimplify) {
-    std::sort(theBoundaries.begin(), theBoundaries.end());
-    TopoDS_Solid                   firstSpan;
-    NCollection_List<TopoDS_Shape> otherSpans;
-    for (std::size_t i = 1; i < theBoundaries.size(); ++i)
-    {
-      const double begin = theBoundaries[i - 1];
-      const double end   = theBoundaries[i];
-      if (end - begin <= Precision::Angular())
+  const auto buildSweep =
+    [&](std::vector<double> theBoundaries, bool theSimplify, bool theExactWalls = false) {
+      std::sort(theBoundaries.begin(), theBoundaries.end());
+      TopoDS_Solid                   firstSpan;
+      NCollection_List<TopoDS_Shape> otherSpans;
+      for (std::size_t i = 1; i < theBoundaries.size(); ++i)
       {
-        continue;
+        const double begin = theBoundaries[i - 1];
+        const double end   = theBoundaries[i];
+        if (end - begin <= Precision::Angular())
+        {
+          continue;
+        }
+        const double middle = 0.5 * (begin + end);
+        const bool positive = cosine * std::cos(middle) + sine * std::sin(middle) + constant > 0.0;
+        HelixSpan  span{cylinder, radial, tangent, advance, begin, end, positive};
+        const TopoDS_Solid sweptSpan = span.build(theMotion.SurfaceTolerance, theExactWalls);
+        if (firstSpan.IsNull())
+        {
+          firstSpan = sweptSpan;
+        }
+        else
+        {
+          otherSpans.Append(sweptSpan);
+        }
       }
-      const double middle   = 0.5 * (begin + end);
-      const bool   positive = cosine * std::cos(middle) + sine * std::sin(middle) + constant > 0.0;
-      HelixSpan    span{cylinder, radial, tangent, advance, begin, end, positive};
-      const TopoDS_Solid sweptSpan = span.build(theMotion.SurfaceTolerance);
-      if (firstSpan.IsNull())
+      const TopoDS_Solid result = FuseSweep(firstSpan, otherSpans, theSimplify);
+      if (result.IsNull() || !BRepCheck_Analyzer(result).IsValid())
       {
-        firstSpan = sweptSpan;
+        throw Standard_ConstructionError("Helical sweep union is invalid");
       }
-      else
-      {
-        otherSpans.Append(sweptSpan);
-      }
-    }
-    const TopoDS_Solid result = FuseSweep(firstSpan, otherSpans, theSimplify);
-    if (result.IsNull() || !BRepCheck_Analyzer(result).IsValid())
-    {
-      throw Standard_ConstructionError("Helical sweep union is invalid");
-    }
-    return result;
-  };
+      return result;
+    };
 
   // For parallel axes, each horizontal slice sees an arc shorter than half
   // a turn when the advance exceeds twice the height. With positive inner
@@ -540,11 +588,20 @@ TopoDS_Solid BRepAlgoAPI_SolidSweep::Sweep(const TopoDS_Solid&       theSolid,
     TopoDS_Solid aResult;
     try
     {
-      aResult = buildSweep({0.0, 0.8 * anExtraAngle, fullTurn + 0.2 * anExtraAngle, angle}, false);
+      aResult =
+        buildSweep({0.0, 0.8 * anExtraAngle, fullTurn + 0.2 * anExtraAngle, angle}, false, true);
     }
     catch (const Standard_Failure&)
     {
-      // Retry with the regular half-turn cuts if the longer middle cell fails.
+      try
+      {
+        aResult =
+          buildSweep({0.0, 0.8 * anExtraAngle, fullTurn + 0.2 * anExtraAngle, angle}, false);
+      }
+      catch (const Standard_Failure&)
+      {
+        // Retry with regular half-turn cuts if the longer middle cell fails.
+      }
     }
     if (!aResult.IsNull())
     {
@@ -574,7 +631,7 @@ TopoDS_Solid BRepAlgoAPI_SolidSweep::Sweep(const TopoDS_Solid&       theSolid,
   return buildSweep(boundaries, true);
 }
 
-TopoDS_Solid BRepAlgoAPI_SolidSweep::Sweep(const TopoDS_Solid&                 theSolid,
+TopoDS_Solid BRepSolidSweep_Sweep::Sweep(const TopoDS_Solid&                 theSolid,
                                            const NCollection_Sequence<gp_Vec>& theOffsets)
 {
   if (theSolid.IsNull() || theOffsets.IsEmpty())
@@ -700,7 +757,7 @@ TopoDS_Solid SweepCylinderTransversely(const TopoDS_Solid& theCylinder,
 }
 } // namespace
 
-TopoDS_Solid BRepAlgoAPI_SolidSweep::Sweep(const TopoDS_Solid&        theSolid,
+TopoDS_Solid BRepSolidSweep_Sweep::Sweep(const TopoDS_Solid&        theSolid,
                                            const CircularTranslation& theMotion)
 {
   const gp_Ax1& aPathAxis = theMotion.Axis;

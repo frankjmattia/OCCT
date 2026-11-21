@@ -16,7 +16,7 @@
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
-#include <BRepAlgoAPI_SolidSweep.hxx>
+#include <BRepOffsetAPI_MakeSolidSweep.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeSolid.hxx>
@@ -35,15 +35,16 @@
 #include <TopoDS_Shell.hxx>
 #include <TopoDS_Solid.hxx>
 #include <gp_Ax2.hxx>
+#include <gp_Cylinder.hxx>
 #include <gp_Pln.hxx>
 
 #include <cmath>
 
-TEST(BRepAlgoAPI_SolidSweepTest, BoxAlongX)
+TEST(BRepOffsetAPI_MakeSolidSweepTest, BoxAlongX)
 {
   const TopoDS_Solid aBody = BRepPrimAPI_MakeBox(2.0, 3.0, 4.0).Solid();
 
-  const TopoDS_Shape aResult = BRepAlgoAPI_SolidSweep::Sweep(aBody, gp_Vec(4.0, 0.0, 0.0));
+  const TopoDS_Shape aResult = BRepOffsetAPI_MakeSolidSweep::Sweep(aBody, gp_Vec(4.0, 0.0, 0.0));
 
   ASSERT_EQ(aResult.ShapeType(), TopAbs_SOLID);
   ASSERT_TRUE(BRepCheck_Analyzer(aResult).IsValid());
@@ -53,11 +54,11 @@ TEST(BRepAlgoAPI_SolidSweepTest, BoxAlongX)
   EXPECT_NEAR(aProperties.Mass(), 72.0, 1.0e-8);
 }
 
-TEST(BRepAlgoAPI_SolidSweepTest, BoxAlongDiagonal)
+TEST(BRepOffsetAPI_MakeSolidSweepTest, BoxAlongDiagonal)
 {
   const TopoDS_Solid aBody = BRepPrimAPI_MakeBox(2.0, 3.0, 4.0).Solid();
 
-  const TopoDS_Shape aResult = BRepAlgoAPI_SolidSweep::Sweep(aBody, gp_Vec(4.0, -5.0, 0.0));
+  const TopoDS_Shape aResult = BRepOffsetAPI_MakeSolidSweep::Sweep(aBody, gp_Vec(4.0, -5.0, 0.0));
 
   ASSERT_EQ(aResult.ShapeType(), TopAbs_SOLID);
   ASSERT_TRUE(BRepCheck_Analyzer(aResult).IsValid());
@@ -67,7 +68,7 @@ TEST(BRepAlgoAPI_SolidSweepTest, BoxAlongDiagonal)
   EXPECT_NEAR(aProperties.Mass(), 112.0, 1.0e-8);
 }
 
-TEST(BRepAlgoAPI_SolidSweepTest, TetrahedronAlongZ)
+TEST(BRepOffsetAPI_MakeSolidSweepTest, TetrahedronAlongZ)
 {
   const gp_Pnt anOrigin(0.0, 0.0, 0.0);
   const gp_Pnt anX(3.0, 0.0, 0.0);
@@ -92,7 +93,7 @@ TEST(BRepAlgoAPI_SolidSweepTest, TetrahedronAlongZ)
   ASSERT_TRUE(BRepLib::OrientClosedSolid(aBody));
   ASSERT_TRUE(BRepCheck_Analyzer(aBody).IsValid());
 
-  const TopoDS_Solid aResult = BRepAlgoAPI_SolidSweep::Sweep(aBody, gp_Vec(0.0, 0.0, 5.0));
+  const TopoDS_Solid aResult = BRepOffsetAPI_MakeSolidSweep::Sweep(aBody, gp_Vec(0.0, 0.0, 5.0));
   ASSERT_FALSE(aResult.IsNull());
   ASSERT_TRUE(BRepCheck_Analyzer(aResult).IsValid());
 
@@ -102,7 +103,7 @@ TEST(BRepAlgoAPI_SolidSweepTest, TetrahedronAlongZ)
   EXPECT_NEAR(aProperties.Mass(), 4.0 + 5.0 * 6.0, 1.0e-8);
 }
 
-TEST(BRepAlgoAPI_SolidSweepTest, BoxAlongRetracingPolyline)
+TEST(BRepOffsetAPI_MakeSolidSweepTest, BoxAlongRetracingPolyline)
 {
   const TopoDS_Solid aBody = BRepPrimAPI_MakeBox(2.0, 3.0, 4.0).Solid();
 
@@ -111,7 +112,7 @@ TEST(BRepAlgoAPI_SolidSweepTest, BoxAlongRetracingPolyline)
   anOffsets.Append(gp_Vec(4.0, 0.0, 0.0));
   anOffsets.Append(gp_Vec(1.0, 0.0, 0.0));
   anOffsets.Append(gp_Vec(7.0, 0.0, 0.0));
-  const TopoDS_Shape aResult = BRepAlgoAPI_SolidSweep::Sweep(aBody, anOffsets);
+  const TopoDS_Shape aResult = BRepOffsetAPI_MakeSolidSweep::Sweep(aBody, anOffsets);
 
   ASSERT_EQ(aResult.ShapeType(), TopAbs_SOLID);
   ASSERT_TRUE(BRepCheck_Analyzer(aResult).IsValid());
@@ -121,7 +122,7 @@ TEST(BRepAlgoAPI_SolidSweepTest, BoxAlongRetracingPolyline)
   EXPECT_NEAR(aProperties.Mass(), 108.0, 1.0e-8);
 }
 
-TEST(BRepAlgoAPI_SolidSweepTest, BoxAlongCrossingPolyline)
+TEST(BRepOffsetAPI_MakeSolidSweepTest, BoxAlongCrossingPolyline)
 {
   const TopoDS_Solid aBody = BRepPrimAPI_MakeBox(2.0, 3.0, 4.0).Solid();
 
@@ -131,7 +132,7 @@ TEST(BRepAlgoAPI_SolidSweepTest, BoxAlongCrossingPolyline)
   anOffsets.Append(gp_Vec(8.0, 8.0, 0.0));
   anOffsets.Append(gp_Vec(4.0, 8.0, 0.0));
   anOffsets.Append(gp_Vec(4.0, -4.0, 0.0));
-  const TopoDS_Shape aResult = BRepAlgoAPI_SolidSweep::Sweep(aBody, anOffsets);
+  const TopoDS_Shape aResult = BRepOffsetAPI_MakeSolidSweep::Sweep(aBody, anOffsets);
 
   ASSERT_EQ(aResult.ShapeType(), TopAbs_SOLID);
   ASSERT_TRUE(BRepCheck_Analyzer(aResult).IsValid());
@@ -144,14 +145,14 @@ TEST(BRepAlgoAPI_SolidSweepTest, BoxAlongCrossingPolyline)
   EXPECT_NEAR(aProperties.Mass(), aVolume, 1.0e-8);
 }
 
-TEST(BRepAlgoAPI_SolidSweepTest, CylinderAlongTransverseLine)
+TEST(BRepOffsetAPI_MakeSolidSweepTest, CylinderAlongTransverseLine)
 {
   const double       aRadius = 2.0;
   const double       aHeight = 3.0;
   const double       aTravel = 5.0;
   const TopoDS_Solid aBody   = BRepPrimAPI_MakeCylinder(aRadius, aHeight).Solid();
 
-  const TopoDS_Solid aResult = BRepAlgoAPI_SolidSweep::Sweep(aBody, gp_Vec(aTravel, 0.0, 0.0));
+  const TopoDS_Solid aResult = BRepOffsetAPI_MakeSolidSweep::Sweep(aBody, gp_Vec(aTravel, 0.0, 0.0));
 
   ASSERT_EQ(aResult.ShapeType(), TopAbs_SOLID);
   ASSERT_TRUE(BRepCheck_Analyzer(aResult).IsValid());
@@ -163,13 +164,13 @@ TEST(BRepAlgoAPI_SolidSweepTest, CylinderAlongTransverseLine)
   EXPECT_NEAR(aProperties.Mass(), aVolume, 1.0e-8);
 }
 
-TEST(BRepAlgoAPI_SolidSweepTest, CylinderAlongAxis)
+TEST(BRepOffsetAPI_MakeSolidSweepTest, CylinderAlongAxis)
 {
   const double       aRadius = 2.0;
   const double       aHeight = 3.0;
   const double       aTravel = 5.0;
   const TopoDS_Solid aBody   = BRepPrimAPI_MakeCylinder(aRadius, aHeight).Solid();
-  const TopoDS_Solid aResult = BRepAlgoAPI_SolidSweep::Sweep(aBody, gp_Vec(0.0, 0.0, aTravel));
+  const TopoDS_Solid aResult = BRepOffsetAPI_MakeSolidSweep::Sweep(aBody, gp_Vec(0.0, 0.0, aTravel));
 
   ASSERT_FALSE(aResult.IsNull());
   ASSERT_TRUE(BRepCheck_Analyzer(aResult).IsValid());
@@ -181,10 +182,10 @@ TEST(BRepAlgoAPI_SolidSweepTest, CylinderAlongAxis)
               1.0e-8);
 }
 
-TEST(BRepAlgoAPI_SolidSweepTest, CylinderAlongObliqueLine)
+TEST(BRepOffsetAPI_MakeSolidSweepTest, CylinderAlongObliqueLine)
 {
   const TopoDS_Solid aBody   = BRepPrimAPI_MakeCylinder(2.0, 3.0).Solid();
-  const TopoDS_Solid aResult = BRepAlgoAPI_SolidSweep::Sweep(aBody, gp_Vec(5.0, 0.0, 4.0));
+  const TopoDS_Solid aResult = BRepOffsetAPI_MakeSolidSweep::Sweep(aBody, gp_Vec(5.0, 0.0, 4.0));
   ASSERT_FALSE(aResult.IsNull());
   ASSERT_TRUE(BRepCheck_Analyzer(aResult).IsValid());
 
@@ -197,7 +198,7 @@ TEST(BRepAlgoAPI_SolidSweepTest, CylinderAlongObliqueLine)
   EXPECT_EQ(aClassifier.State(), TopAbs_OUT);
 }
 
-TEST(BRepAlgoAPI_SolidSweepTest, CylinderAlongObliqueRetrace)
+TEST(BRepOffsetAPI_MakeSolidSweepTest, CylinderAlongObliqueRetrace)
 {
   const TopoDS_Solid           aBody = BRepPrimAPI_MakeCylinder(2.0, 3.0).Solid();
   const gp_Vec                 anEnd(10.0, 0.0, 8.0);
@@ -207,8 +208,8 @@ TEST(BRepAlgoAPI_SolidSweepTest, CylinderAlongObliqueRetrace)
   anOffsets.Append(0.25 * anEnd);
   anOffsets.Append(anEnd);
 
-  const TopoDS_Solid aResult    = BRepAlgoAPI_SolidSweep::Sweep(aBody, anOffsets);
-  const TopoDS_Solid aReference = BRepAlgoAPI_SolidSweep::Sweep(aBody, anEnd);
+  const TopoDS_Solid aResult    = BRepOffsetAPI_MakeSolidSweep::Sweep(aBody, anOffsets);
+  const TopoDS_Solid aReference = BRepOffsetAPI_MakeSolidSweep::Sweep(aBody, anEnd);
   ASSERT_FALSE(aResult.IsNull());
   ASSERT_TRUE(BRepCheck_Analyzer(aResult).IsValid());
 
@@ -225,7 +226,7 @@ TEST(BRepAlgoAPI_SolidSweepTest, CylinderAlongObliqueRetrace)
   EXPECT_FALSE(TopExp_Explorer(aMissing.Shape(), TopAbs_SOLID).More());
 }
 
-TEST(BRepAlgoAPI_SolidSweepTest, CylinderAlongCrossingPolyline)
+TEST(BRepOffsetAPI_MakeSolidSweepTest, CylinderAlongCrossingPolyline)
 {
   const TopoDS_Solid           aBody = BRepPrimAPI_MakeCylinder(1.0, 3.0).Solid();
   NCollection_Sequence<gp_Vec> anOffsets;
@@ -234,7 +235,7 @@ TEST(BRepAlgoAPI_SolidSweepTest, CylinderAlongCrossingPolyline)
   anOffsets.Append(gp_Vec(8.0, 8.0, 0.0));
   anOffsets.Append(gp_Vec(4.0, 8.0, 0.0));
   anOffsets.Append(gp_Vec(4.0, -4.0, 0.0));
-  const TopoDS_Solid aResult = BRepAlgoAPI_SolidSweep::Sweep(aBody, anOffsets);
+  const TopoDS_Solid aResult = BRepOffsetAPI_MakeSolidSweep::Sweep(aBody, anOffsets);
   ASSERT_FALSE(aResult.IsNull());
   ASSERT_TRUE(BRepCheck_Analyzer(aResult).IsValid());
 
@@ -266,7 +267,7 @@ TEST(BRepAlgoAPI_SolidSweepTest, CylinderAlongCrossingPolyline)
   EXPECT_EQ(aHorizontalFaces, 2);
 }
 
-TEST(BRepAlgoAPI_SolidSweepTest, TiltedCylinderAlongHelix)
+TEST(BRepOffsetAPI_MakeSolidSweepTest, TiltedCylinderAlongHelix)
 {
   const double       aPi   = std::acos(-1.0);
   const double       aTilt = 25.0 * aPi / 180.0;
@@ -276,17 +277,17 @@ TEST(BRepAlgoAPI_SolidSweepTest, TiltedCylinderAlongHelix)
     BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(8.0, 0.0, 0.0), aBodyAxis), 2.0, 3.0).Solid();
 
   const TopoDS_Solid aHalfTurn =
-    BRepAlgoAPI_SolidSweep::Sweep(aBody,
-                                  BRepAlgoAPI_SolidSweep::HelicalTranslation{aPathAxis, aPi, 16.0});
+    BRepOffsetAPI_MakeSolidSweep::Sweep(aBody,
+                                  BRepOffsetAPI_MakeSolidSweep::HelicalTranslation{aPathAxis, aPi, 16.0});
   ASSERT_FALSE(aHalfTurn.IsNull());
   ASSERT_TRUE(BRepCheck_Analyzer(aHalfTurn).IsValid());
   GProp_GProps aHalfTurnProperties;
   BRepGProp::VolumeProperties(aHalfTurn, aHalfTurnProperties);
   EXPECT_NEAR(aHalfTurnProperties.Mass(), 386.521, 0.01); // Standalone prototype baseline.
 
-  const TopoDS_Solid aLongSweep = BRepAlgoAPI_SolidSweep::Sweep(
+  const TopoDS_Solid aLongSweep = BRepOffsetAPI_MakeSolidSweep::Sweep(
     aBody,
-    BRepAlgoAPI_SolidSweep::HelicalTranslation{aPathAxis, 2.5 * aPi, 16.0});
+    BRepOffsetAPI_MakeSolidSweep::HelicalTranslation{aPathAxis, 2.5 * aPi, 16.0});
   ASSERT_FALSE(aLongSweep.IsNull());
   ASSERT_TRUE(BRepCheck_Analyzer(aLongSweep).IsValid());
   GProp_GProps aLongSweepProperties;
@@ -301,16 +302,16 @@ TEST(BRepAlgoAPI_SolidSweepTest, TiltedCylinderAlongHelix)
   EXPECT_EQ(aClassifier.State(), TopAbs_IN);
 }
 
-TEST(BRepAlgoAPI_SolidSweepTest, UprightNonOverlappingHelixUsesOneSpan)
+TEST(BRepOffsetAPI_MakeSolidSweepTest, UprightNonOverlappingHelixUsesOneSpan)
 {
   const double       aPi = std::acos(-1.0);
   const gp_Ax1       aPathAxis(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
   const TopoDS_Solid aBody =
     BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(8.0, 0.0, 0.0), aPathAxis.Direction()), 2.0, 3.0)
       .Solid();
-  const TopoDS_Solid aResult = BRepAlgoAPI_SolidSweep::Sweep(
+  const TopoDS_Solid aResult = BRepOffsetAPI_MakeSolidSweep::Sweep(
     aBody,
-    BRepAlgoAPI_SolidSweep::HelicalTranslation{aPathAxis, 2.5 * aPi, 16.0});
+    BRepOffsetAPI_MakeSolidSweep::HelicalTranslation{aPathAxis, 2.5 * aPi, 16.0});
   ASSERT_FALSE(aResult.IsNull());
   ASSERT_TRUE(BRepCheck_Analyzer(aResult).IsValid());
 
@@ -326,18 +327,33 @@ TEST(BRepAlgoAPI_SolidSweepTest, UprightNonOverlappingHelixUsesOneSpan)
   EXPECT_NEAR(aProperties.Mass(), 332.0 * aPi, 0.002);
 }
 
-TEST(BRepAlgoAPI_SolidSweepTest, OverlappingHelixHasNoHalfTurnSection)
+TEST(BRepOffsetAPI_MakeSolidSweepTest, OverlappingHelixHasNoHalfTurnSection)
 {
   const double       aPi = std::acos(-1.0);
   const gp_Ax1       aPathAxis(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
   const TopoDS_Solid aBody =
     BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(8.0, 0.0, 0.0), aPathAxis.Direction()), 2.0, 3.0)
       .Solid();
-  const TopoDS_Solid aResult = BRepAlgoAPI_SolidSweep::Sweep(
+  const TopoDS_Solid aResult = BRepOffsetAPI_MakeSolidSweep::Sweep(
     aBody,
-    BRepAlgoAPI_SolidSweep::HelicalTranslation{aPathAxis, 2.5 * aPi, 2.0});
+    BRepOffsetAPI_MakeSolidSweep::HelicalTranslation{aPathAxis, 2.5 * aPi, 2.0});
   ASSERT_FALSE(aResult.IsNull());
   ASSERT_TRUE(BRepCheck_Analyzer(aResult).IsValid());
+
+  bool hasInnerWall = false;
+  bool hasOuterWall = false;
+  for (TopExp_Explorer aFace(aResult, TopAbs_FACE); aFace.More(); aFace.Next())
+  {
+    const BRepAdaptor_Surface aSurface(TopoDS::Face(aFace.Current()));
+    if (aSurface.GetType() == GeomAbs_Cylinder)
+    {
+      const double aRadius = aSurface.Cylinder().Radius();
+      hasInnerWall         = hasInnerWall || std::abs(aRadius - 6.0) < 1.0e-7;
+      hasOuterWall         = hasOuterWall || std::abs(aRadius - 10.0) < 1.0e-7;
+    }
+  }
+  EXPECT_TRUE(hasInnerWall);
+  EXPECT_TRUE(hasOuterWall);
 
   // At the old artificial half-turn cut, both cap rings were on the left.
   for (TopExp_Explorer anEdge(aResult, TopAbs_EDGE); anEdge.More(); anEdge.Next())
@@ -358,7 +374,7 @@ TEST(BRepAlgoAPI_SolidSweepTest, OverlappingHelixHasNoHalfTurnSection)
   }
 }
 
-TEST(BRepAlgoAPI_SolidSweepTest, CylinderAlongQuarterCircle)
+TEST(BRepOffsetAPI_MakeSolidSweepTest, CylinderAlongQuarterCircle)
 {
   const double       aRadius     = 2.0;
   const double       aHeight     = 3.0;
@@ -369,8 +385,8 @@ TEST(BRepAlgoAPI_SolidSweepTest, CylinderAlongQuarterCircle)
   const TopoDS_Solid aBody = BRepPrimAPI_MakeCylinder(aFrame, aRadius, aHeight).Solid();
   const gp_Ax1       aPathAxis(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
   const TopoDS_Shape aResult =
-    BRepAlgoAPI_SolidSweep::Sweep(aBody,
-                                  BRepAlgoAPI_SolidSweep::CircularTranslation{aPathAxis, anAngle});
+    BRepOffsetAPI_MakeSolidSweep::Sweep(aBody,
+                                  BRepOffsetAPI_MakeSolidSweep::CircularTranslation{aPathAxis, anAngle});
 
   ASSERT_EQ(aResult.ShapeType(), TopAbs_SOLID);
   ASSERT_TRUE(BRepCheck_Analyzer(aResult).IsValid());
@@ -383,7 +399,7 @@ TEST(BRepAlgoAPI_SolidSweepTest, CylinderAlongQuarterCircle)
   EXPECT_NEAR(aProperties.Mass(), aVolume, 1.0e-8);
 }
 
-TEST(BRepAlgoAPI_SolidSweepTest, CylinderAlongTightSemicircle)
+TEST(BRepOffsetAPI_MakeSolidSweepTest, CylinderAlongTightSemicircle)
 {
   const double aRadius = 2.0;
   const double aHeight = 3.0;
@@ -396,8 +412,8 @@ TEST(BRepAlgoAPI_SolidSweepTest, CylinderAlongTightSemicircle)
     const gp_Ax2       aFrame(gp_Pnt(aPathRadius, 0.0, 0.0), aPathAxis.Direction());
     const TopoDS_Solid aBody = BRepPrimAPI_MakeCylinder(aFrame, aRadius, aHeight).Solid();
     const TopoDS_Shape aResult =
-      BRepAlgoAPI_SolidSweep::Sweep(aBody,
-                                    BRepAlgoAPI_SolidSweep::CircularTranslation{aPathAxis, aPi});
+      BRepOffsetAPI_MakeSolidSweep::Sweep(aBody,
+                                    BRepOffsetAPI_MakeSolidSweep::CircularTranslation{aPathAxis, aPi});
 
     ASSERT_EQ(aResult.ShapeType(), TopAbs_SOLID);
     ASSERT_TRUE(BRepCheck_Analyzer(aResult).IsValid());

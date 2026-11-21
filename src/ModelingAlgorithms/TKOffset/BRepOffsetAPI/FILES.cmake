@@ -20,6 +20,8 @@ set(OCCT_BRepOffsetAPI_FILES
   BRepOffsetAPI_MakePipe.hxx
   BRepOffsetAPI_MakePipeShell.cxx
   BRepOffsetAPI_MakePipeShell.hxx
+  BRepOffsetAPI_MakeSolidSweep.cxx
+  BRepOffsetAPI_MakeSolidSweep.hxx
   BRepOffsetAPI_MakeThickSolid.cxx
   BRepOffsetAPI_MakeThickSolid.hxx
   BRepOffsetAPI_MiddlePath.cxx

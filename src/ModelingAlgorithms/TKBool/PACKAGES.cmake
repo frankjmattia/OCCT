@@ -6,5 +6,6 @@ set(OCCT_TKBool_LIST_OF_PACKAGES
   TopOpeBRepTool
   BRepAlgo
   BRepFill
+  BRepSolidSweep
   BRepProj
 )

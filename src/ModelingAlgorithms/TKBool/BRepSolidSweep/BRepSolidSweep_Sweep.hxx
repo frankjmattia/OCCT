@@ -12,8 +12,8 @@
 // Alternatively, this file may be used under the terms of Open CASCADE
 // commercial license or contractual agreement.
 
-#ifndef _BRepAlgoAPI_SolidSweep_HeaderFile
-#define _BRepAlgoAPI_SolidSweep_HeaderFile
+#ifndef _BRepSolidSweep_Sweep_HeaderFile
+#define _BRepSolidSweep_Sweep_HeaderFile
 
 #include <NCollection_Sequence.hxx>
 #include <Standard.hxx>
@@ -21,7 +21,7 @@
 #include <gp_Ax1.hxx>
 #include <gp_Vec.hxx>
 
-class BRepAlgoAPI_SolidSweep
+class BRepSolidSweep_Sweep
 {
 public:
   //! Circular translation around a world-space axis with fixed body orientation.

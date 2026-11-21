@@ -17,9 +17,11 @@
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepOffsetAPI_MakeSolidSweep.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeSolid.hxx>
+#include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
@@ -35,10 +37,120 @@
 #include <TopoDS_Shell.hxx>
 #include <TopoDS_Solid.hxx>
 #include <gp_Ax2.hxx>
+#include <gp_Ax3.hxx>
+#include <gp_Circ.hxx>
+#include <gp_Cone.hxx>
+#include <gp_Torus.hxx>
 #include <gp_Cylinder.hxx>
 #include <gp_Pln.hxx>
 
 #include <cmath>
+
+namespace
+{
+TopoDS_Solid makeRoundedFrustum(const gp_Ax2& theFrame,
+                                double        theCrestRadius,
+                                double        theWidth,
+                                double        theTaper,
+                                double        theBackCorner,
+                                double        theFrontCorner)
+{
+  const double aPi          = std::acos(-1.0);
+  const double aBackRadius  = theCrestRadius - theBackCorner;
+  const double aFrontRadius = aBackRadius + (theBackCorner - theFrontCorner) / std::cos(theTaper)
+                              + (theBackCorner - theWidth + theFrontCorner) * std::tan(theTaper);
+  const gp_Vec anAxis(theFrame.Direction());
+  const auto aLocation = [&](double theZ) { return theFrame.Location().Translated(theZ * anAxis); };
+  const auto anAxes    = [&](double theZ) {
+    return gp_Ax3(aLocation(theZ), theFrame.Direction(), theFrame.XDirection());
+  };
+
+  BRepBuilderAPI_Sewing aSewing(1.0e-6);
+  aSewing.Add(BRepBuilderAPI_MakeFace(gp_Torus(anAxes(theBackCorner), aBackRadius, theBackCorner),
+                                      0.0,
+                                      2.0 * aPi,
+                                      -0.5 * aPi,
+                                      theTaper)
+                .Face());
+  aSewing.Add(BRepBuilderAPI_MakeFace(
+                gp_Torus(anAxes(theWidth - theFrontCorner), aFrontRadius, theFrontCorner),
+                0.0,
+                2.0 * aPi,
+                theTaper,
+                0.5 * aPi)
+                .Face());
+
+  const double aBackZ  = theBackCorner * (1.0 + std::sin(theTaper));
+  const double aFrontZ = theWidth - theFrontCorner * (1.0 - std::sin(theTaper));
+  const double aLength = (aFrontZ - aBackZ) / std::cos(theTaper);
+  if (theTaper == 0.0)
+  {
+    const gp_Cylinder aCylinder(anAxes(aBackZ), theCrestRadius);
+    aSewing.Add(BRepBuilderAPI_MakeFace(aCylinder, 0.0, 2.0 * aPi, 0.0, aLength).Face());
+  }
+  else
+  {
+    const gp_Cone aCone(anAxes(aBackZ),
+                        -theTaper,
+                        aBackRadius + theBackCorner * std::cos(theTaper));
+    // Two tangent conical faces exercise a different topology from the cylinder.
+    aSewing.Add(BRepBuilderAPI_MakeFace(aCone, 0.0, 2.0 * aPi, 0.0, 0.5 * aLength).Face());
+    aSewing.Add(BRepBuilderAPI_MakeFace(aCone, 0.0, 2.0 * aPi, 0.5 * aLength, aLength).Face());
+  }
+
+  const auto addCap = [&](double theZ, double theRadius) {
+    const gp_Ax2            aFrame(aLocation(theZ), theFrame.Direction(), theFrame.XDirection());
+    BRepBuilderAPI_MakeEdge anEdge(gp_Circ(aFrame, theRadius));
+    BRepBuilderAPI_MakeWire aWire(anEdge.Edge());
+    aSewing.Add(BRepBuilderAPI_MakeFace(aWire.Wire()).Face());
+  };
+  addCap(0.0, aBackRadius);
+  addCap(theWidth, aFrontRadius);
+
+  aSewing.Perform();
+  const TopoDS_Shape& aShell = aSewing.SewedShape();
+  if (aShell.IsNull() || aShell.ShapeType() != TopAbs_SHELL || aSewing.NbFreeEdges() != 0)
+    return {};
+  TopoDS_Solid aResult = BRepBuilderAPI_MakeSolid(TopoDS::Shell(aShell)).Solid();
+  if (!BRepLib::OrientClosedSolid(aResult))
+    return {};
+  return aResult;
+}
+} // namespace
+
+TEST(BRepOffsetAPI_MakeSolidSweepTest, AxisymmetricBodiesAlongScrewMotion)
+{
+  const double aPi   = std::acos(-1.0);
+  const double aTilt = aPi / 7.0;
+  const gp_Dir aBodyAxis(std::sin(aTilt), 0.0, std::cos(aTilt));
+  const gp_Pnt aBase(170.0, 0.0, 0.0);
+  const gp_Ax1 anAxis(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
+  const double aWidth    = 9.6;
+  const double anAdvance = 360.0;
+  for (const double aTaper : {0.0, aPi / 9.0})
+  {
+    SCOPED_TRACE(aTaper);
+    const TopoDS_Solid aBody =
+      makeRoundedFrustum(gp_Ax2(aBase, aBodyAxis), 39.4, aWidth, aTaper, 0.65, 1.1);
+    ASSERT_FALSE(aBody.IsNull());
+
+    const TopoDS_Solid aResult = BRepOffsetAPI_MakeSolidSweep::Sweep(
+      aBody,
+      BRepOffsetAPI_MakeSolidSweep::ScrewMotion{anAxis, 2.5 * aPi, anAdvance, 0.005});
+    ASSERT_FALSE(aResult.IsNull());
+    ASSERT_TRUE(BRepCheck_Analyzer(aResult).IsValid());
+
+    const double aStation = 2.25 * aPi;
+    const gp_Pnt aCenter =
+      aBase.Translated(0.5 * aWidth * gp_Vec(aBodyAxis))
+        .Rotated(anAxis, aStation)
+        .Translated((anAdvance * aStation / (2.0 * aPi)) * gp_Vec(anAxis.Direction()));
+    BRepClass3d_SolidClassifier aClassifier(aResult, aCenter, 1.0e-7);
+    EXPECT_EQ(aClassifier.State(), TopAbs_IN);
+    aClassifier.Perform(gp_Pnt(0.0, 0.0, aCenter.Z()), 1.0e-7);
+    EXPECT_EQ(aClassifier.State(), TopAbs_OUT);
+  }
+}
 
 TEST(BRepOffsetAPI_MakeSolidSweepTest, BoxAlongX)
 {

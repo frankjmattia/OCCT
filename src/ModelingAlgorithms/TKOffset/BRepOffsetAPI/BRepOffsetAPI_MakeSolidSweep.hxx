@@ -20,15 +20,19 @@
 
 #include <variant>
 
-//! Builds the volume occupied by a solid undergoing fixed-orientation motion.
+//! Builds the volume occupied by a solid undergoing rigid motion.
 //! Subshape history is not provided by this operation.
 class BRepOffsetAPI_MakeSolidSweep : public BRepBuilderAPI_MakeShape
 {
 public:
   using CircularTranslation = BRepSolidSweep_Sweep::CircularTranslation;
-  using HelicalTranslation = BRepSolidSweep_Sweep::HelicalTranslation;
-  using Motion =
-    std::variant<gp_Vec, NCollection_Sequence<gp_Vec>, CircularTranslation, HelicalTranslation>;
+  using HelicalTranslation  = BRepSolidSweep_Sweep::HelicalTranslation;
+  using ScrewMotion         = BRepSolidSweep_Sweep::ScrewMotion;
+  using Motion              = std::variant<gp_Vec,
+                                           NCollection_Sequence<gp_Vec>,
+                                           CircularTranslation,
+                                           HelicalTranslation,
+                                           ScrewMotion>;
 
   //! Initializes the builder. Build() or Solid() computes the swept volume.
   Standard_EXPORT BRepOffsetAPI_MakeSolidSweep(const TopoDS_Solid& theSolid,

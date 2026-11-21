@@ -40,6 +40,15 @@ public:
     double SurfaceTolerance = 1.0e-5; //!< Target sampled deviation in model units.
   };
 
+  //! Rotation about a fixed axis combined with translation along that axis.
+  struct ScrewMotion
+  {
+    gp_Ax1 Axis;
+    double Angle            = 0.0;   //!< Positive angle in radians.
+    double AdvancePerTurn   = 0.0;   //!< Signed axial advance per revolution.
+    double SurfaceTolerance = 0.005; //!< Target sampled deviation in model units.
+  };
+
   //! Sweeps a valid solid along a straight translation.
   //! Supports planar-faced solids and full right circular cylinders.
   //! Other cases raise Standard_ConstructionError.
@@ -61,6 +70,11 @@ public:
   //! Raises Standard_ConstructionError if a valid swept solid cannot be built.
   Standard_EXPORT static TopoDS_Solid Sweep(const TopoDS_Solid&       theSolid,
                                             const HelicalTranslation& theMotion);
+  //! Sweeps an axisymmetric solid with two disk caps and tangent side faces.
+  //! Supports coaxial cylindrical, conical and toroidal bands, positive
+  //! cap-normal velocity and non-overlapping turns.
+  Standard_EXPORT static TopoDS_Solid Sweep(const TopoDS_Solid& theSolid,
+                                            const ScrewMotion& theMotion);
 };
 
 #endif

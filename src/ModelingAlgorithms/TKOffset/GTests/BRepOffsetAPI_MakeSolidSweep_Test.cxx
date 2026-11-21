@@ -29,6 +29,7 @@
 #include <BRepLib.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
+#include <BRep_Tool.hxx>
 #include <GProp_GProps.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
@@ -44,6 +45,7 @@
 #include <gp_Cylinder.hxx>
 #include <gp_Pln.hxx>
 
+#include <algorithm>
 #include <cmath>
 
 namespace
@@ -136,7 +138,7 @@ TEST(BRepOffsetAPI_MakeSolidSweepTest, AxisymmetricBodiesAlongScrewMotion)
 
     const TopoDS_Solid aResult = BRepOffsetAPI_MakeSolidSweep::Sweep(
       aBody,
-      BRepOffsetAPI_MakeSolidSweep::ScrewMotion{anAxis, 2.5 * aPi, anAdvance, 0.005});
+      BRepOffsetAPI_MakeSolidSweep::ScrewMotion{anAxis, 2.5 * aPi, anAdvance, 0.0001});
     ASSERT_FALSE(aResult.IsNull());
     ASSERT_TRUE(BRepCheck_Analyzer(aResult).IsValid());
 
@@ -542,4 +544,141 @@ TEST(BRepOffsetAPI_MakeSolidSweepTest, CylinderAlongTightSemicircle)
     BRepGProp::VolumeProperties(aResult, aProperties);
     EXPECT_NEAR(aProperties.Mass(), anArea * aHeight, 1.0e-8);
   }
+}
+
+namespace
+{
+void checkRevolvingBox(double theRadialDrift)
+{
+  const TopoDS_Solid aBox = BRepPrimAPI_MakeBox(gp_Pnt(0.0, 2.0, 0.0), 1.0, 1.0, 1.0).Solid();
+  constexpr double aLength = 1.4;
+  constexpr double aRate = 0.32;
+  constexpr double aSlope = 0.10;
+  const BRepOffsetAPI_MakeSolidSweep::RevolvingMotion aMotion{
+    gp::OX(), gp_Vec(1.0, theRadialDrift, -0.05), aRate, aSlope, aLength, 1e-5};
+  const auto aSweep = BRepOffsetAPI_MakeSolidSweep::Sweep(aBox, aMotion);
+  ASSERT_TRUE(BRepCheck_Analyzer(aSweep).IsValid());
+  BRepClass3d_SolidClassifier aClassifier(aSweep);
+  int anInside = 0, anOutside = 0;
+  for (double x : {0.19, 0.6, 1.2, 1.65, 2.2})
+    for (double y : {1.7, 2.26, 2.53, 2.89, 3.26, 3.5})
+      for (double z : {-0.2, 0.32, 0.82, 1.27, 1.81, 2.1})
+      {
+        const gp_Pnt aPoint(x, y, z);
+        double aDistance = 10.0;
+        for (int i = 0; i <= 1024; ++i)
+        {
+          const double t = aLength * i / 1024.0;
+          const double aPhase = (aRate / aSlope) * std::log(1.0 + aSlope * t);
+          const double yLocal = y * std::cos(aPhase) + z * std::sin(aPhase) - theRadialDrift * t;
+          const double zLocal = z * std::cos(aPhase) - y * std::sin(aPhase) + 0.05 * t;
+          const double xLocal = x - t;
+          aDistance = std::min(aDistance, std::max({-xLocal, xLocal - 1.0,
+            2.0 - yLocal, yLocal - 3.0, -zLocal, zLocal - 1.0}));
+        }
+        // Discard samples within the maximum change between adjacent poses.
+        if (std::abs(aDistance) < 0.003)
+          continue;
+        aClassifier.Perform(aPoint, 1e-6);
+        if (aDistance < 0.0)
+        {
+          ++anInside;
+          EXPECT_EQ(aClassifier.State(), TopAbs_IN) << x << ", " << y << ", " << z;
+        }
+        else
+        {
+          ++anOutside;
+          EXPECT_EQ(aClassifier.State(), TopAbs_OUT);
+        }
+      }
+  EXPECT_GT(anInside, 20);
+  EXPECT_GT(anOutside, 20);
+}
+} // namespace
+
+TEST(BRepOffsetAPI_MakeSolidSweepTest, RevolvingBoxWithRadialDrift)
+{
+  checkRevolvingBox(0.50);
+}
+
+TEST(BRepOffsetAPI_MakeSolidSweepTest, RevolvingBoxTrimsBuriedContactFold)
+{
+  checkRevolvingBox(0.18);
+}
+
+namespace
+{
+void checkCurvedRigidSweep(bool theRotates)
+{
+  const TopoDS_Solid                              aBox = BRepPrimAPI_MakeBox(1.0, 1.0, 1.0).Solid();
+  constexpr double                                aLength = 1.4;
+  const BRepOffsetAPI_MakeSolidSweep::RigidMotion aMotion{
+    [=](double theStation) {
+      const double t      = theStation - 2.0;
+      const double aPitch = theRotates ? 0.04 * t * t : 0.0;
+      const double aYaw   = theRotates ? 0.1 * t : 0.0;
+      gp_Trsf      aPitchRotation, aYawRotation, aTranslation;
+      aPitchRotation.SetRotation(gp::OY(), aPitch);
+      aYawRotation.SetRotation(gp::OZ(), aYaw);
+      aTranslation.SetTranslation(
+        gp_Vec(1.3 * t - 0.3, 0.45 * t + 0.05 * t * t + 0.16, 0.38 * t + 0.10 * t * t + 0.1));
+      const gp_Vec anAngular =
+        theRotates ? gp_Vec(-0.08 * t * std::sin(aYaw), 0.08 * t * std::cos(aYaw), 0.1) : gp_Vec();
+      return BRepOffsetAPI_MakeSolidSweep::RigidPose{aTranslation * aYawRotation * aPitchRotation,
+                                                     anAngular,
+                                                     gp_Vec(1.3, 0.45 + 0.1 * t, 0.38 + 0.2 * t)};
+    },
+    2.0,
+    2.0 + aLength,
+    1e-5};
+  const auto aSweep = BRepOffsetAPI_MakeSolidSweep::Sweep(aBox, aMotion);
+  ASSERT_TRUE(BRepCheck_Analyzer(aSweep).IsValid());
+  for (TopExp_Explorer anIt(aSweep, TopAbs_SHELL); anIt.More(); anIt.Next())
+    EXPECT_TRUE(BRep_Tool::IsClosed(anIt.Current()));
+
+  BRepClass3d_SolidClassifier aClassifier(aSweep);
+  int                         anInside = 0, anOutside = 0;
+  for (double x : {-0.4, 0.12, 0.51, 0.87, 1.27, 1.76, 2.11, 2.3})
+    for (double y : {0.17, 0.41, 0.72, 1.13, 1.56, 1.82})
+      for (double z : {0.12, 0.37, 0.81, 1.06, 1.42, 1.84})
+      {
+        double aDistance = 10.0;
+        for (int i = 0; i <= 1024; ++i)
+        {
+          const double t        = aLength * i / 1024.0;
+          const double aYaw     = theRotates ? 0.1 * t : 0.0;
+          const double aPitch   = theRotates ? 0.04 * t * t : 0.0;
+          const double dx       = x - (1.3 * t - 0.3);
+          const double dy       = y - (0.45 * t + 0.05 * t * t + 0.16);
+          const double dz       = z - (0.38 * t + 0.10 * t * t + 0.1);
+          const double aTurnedX = std::cos(aYaw) * dx + std::sin(aYaw) * dy;
+          const double aLocalX  = std::cos(aPitch) * aTurnedX - std::sin(aPitch) * dz;
+          const double aLocalY  = std::cos(aYaw) * dy - std::sin(aYaw) * dx;
+          const double aLocalZ  = std::sin(aPitch) * aTurnedX + std::cos(aPitch) * dz;
+          aDistance             = std::min(
+            aDistance,
+            std::max({-aLocalX, aLocalX - 1.0, -aLocalY, aLocalY - 1.0, -aLocalZ, aLocalZ - 1.0}));
+        }
+        // Exclude points within the change possible between two sampled poses.
+        if (std::abs(aDistance) < 0.004)
+          continue;
+        aClassifier.Perform(gp_Pnt(x, y, z), 1e-6);
+        anInside += aDistance < 0.0;
+        anOutside += aDistance > 0.0;
+        EXPECT_EQ(aClassifier.State(), aDistance < 0.0 ? TopAbs_IN : TopAbs_OUT)
+          << x << ", " << y << ", " << z;
+      }
+  EXPECT_GT(anInside, 20);
+  EXPECT_GT(anOutside, 20);
+}
+} // namespace
+
+TEST(BRepOffsetAPI_MakeSolidSweepTest, CurvedTranslationWithFixedOrientation)
+{
+  checkCurvedRigidSweep(false);
+}
+
+TEST(BRepOffsetAPI_MakeSolidSweepTest, CurvedMotionWithChangingRotationAxis)
+{
+  checkCurvedRigidSweep(true);
 }

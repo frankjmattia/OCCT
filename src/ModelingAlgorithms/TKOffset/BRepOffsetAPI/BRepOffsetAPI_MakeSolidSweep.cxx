@@ -17,7 +17,7 @@
 #include <TopoDS.hxx>
 
 BRepOffsetAPI_MakeSolidSweep::BRepOffsetAPI_MakeSolidSweep(const TopoDS_Solid& theSolid,
-                                                         const Motion& theMotion)
+                                                           const Motion&       theMotion)
     : mySolid(theSolid),
       myMotion(theMotion)
 {
@@ -47,9 +47,20 @@ TopoDS_Solid BRepOffsetAPI_MakeSolidSweep::Solid()
 }
 
 TopoDS_Solid BRepOffsetAPI_MakeSolidSweep::Sweep(const TopoDS_Solid& theSolid,
-                                               const Motion& theMotion)
+                                                 const Motion&       theMotion)
 {
   BRepOffsetAPI_MakeSolidSweep aBuilder(theSolid, theMotion);
   return aBuilder.Solid();
 }
 
+TopoDS_Solid BRepOffsetAPI_MakeSolidSweep::Sweep(const TopoDS_Solid&    theSolid,
+                                                 const RevolvingMotion& theMotion)
+{
+  return BRepSolidSweep_Sweep::Sweep(theSolid, theMotion);
+}
+
+TopoDS_Solid BRepOffsetAPI_MakeSolidSweep::Sweep(const TopoDS_Solid& theSolid,
+                                                 const RigidMotion&  theMotion)
+{
+  return BRepSolidSweep_Sweep::Sweep(theSolid, theMotion);
+}

@@ -1,0 +1,1825 @@
+// Created by: Frank J. Mattia
+// Copyright (c) 2026 OPEN CASCADE SAS
+//
+// This file is part of Open CASCADE Technology software library.
+//
+// This library is free software; you can redistribute it and/or modify it under
+// the terms of the GNU Lesser General Public License version 2.1 as published
+// by the Free Software Foundation, with special exception defined in the file
+// OCCT_LGPL_EXCEPTION.txt. Consult the file LICENSE_LGPL_21.txt included in OCCT
+// distribution for complete text of the license and disclaimer of any warranty.
+//
+// Alternatively, this file may be used under the terms of Open CASCADE
+// commercial license or contractual agreement.
+
+// Included by BRepSolidSweep_Screw.cxx in its anonymous namespace.
+
+struct PatchCollector : BRepBuilderAPI_Sewing
+{
+  using BRepBuilderAPI_Sewing::BRepBuilderAPI_Sewing;
+  int Count() const { return myOldShapes.Extent(); }
+  const TopoDS_Shape& Input(int index) const { return myOldShapes.FindKey(index); }
+};
+
+struct IntersectingScrewEnvelope : ScrewEnvelope
+{
+  using ScrewEnvelope::ScrewEnvelope;
+  static constexpr int profileIntervals = 128;
+
+  struct CapLateralJoin
+  {
+    double capU, lag, lateralU;
+    int part, branch;
+    std::vector<gp_Pnt2d> initialBoundary;
+    std::vector<gp_Pnt2d> finalBoundary;
+    double rimLag;
+  };
+  std::vector<CapLateralJoin> capJoins;
+
+  void checkFinalTrim(CapLateralJoin& join)
+  {
+    const double z0 = profile(join.part, 0.0).z, z1 = profile(join.part, 1.0).z;
+    const bool capAtLowU = z0 > z1;
+    const double capU = capAtLowU ? 0.0 : 1.0;
+    const double capR = profile(join.part, capU).r;
+    const auto clearance = [&](double t, double u) {
+      const gp_Pnt point = contact(join.part, 0.0, 1.0, join.branch, u);
+      const gp_Vec local(base, pose(point, t - angle));
+      const double z = local.Dot(axis);
+      if (z < std::min(z0, z1))
+        return -1.0;
+      const double radial = (local - z * axis).Magnitude();
+      if (z >= width)
+        return std::min(width - z, capR - radial);
+      double lo = 0.0, hi = 1.0;
+      for (int i = 0; i < 45; ++i)
+      {
+        const double mid = (lo + hi) / 2.0;
+        if (profile(join.part, capAtLowU ? 1.0 - mid : mid).z < z)
+          lo = mid;
+        else
+          hi = mid;
+      }
+      const double v = (lo + hi) / 2.0;
+      return std::min(width - z, profile(join.part, capAtLowU ? 1.0 - v : v).r - radial);
+    };
+    join.finalBoundary.emplace_back(join.lateralU, angle - join.lag);
+    double residual = 0.0;
+    for (int step = 1; step < 32; ++step)
+    {
+      const double t = angle - join.lag * (1.0 - step / 32.0);
+      const double length = std::abs(capU - join.lateralU);
+      const double direction = capAtLowU ? 1.0 : -1.0;
+      double distance = 0.0;
+      for (int i = 1; i <= 256; ++i)
+      {
+        double lo = 2.0 * length * (i - 1) / 256.0;
+        double hi = 2.0 * length * i / 256.0;
+        if (clearance(t, capU + direction * lo) <= 0.0
+            || clearance(t, capU + direction * hi) > 0.0)
+          continue;
+        for (int k = 0; k < 38; ++k)
+        {
+          const double mid = (lo + hi) / 2.0;
+          if (clearance(t, capU + direction * mid) > 0.0)
+            lo = mid;
+          else
+            hi = mid;
+        }
+        distance = (lo + hi) / 2.0;
+        break;
+      }
+      if (distance == 0.0)
+        continue;
+      const double u = capU + direction * distance;
+      residual = std::max(residual, std::abs(clearance(t, u)));
+      join.finalBoundary.emplace_back(u, t);
+    }
+    join.finalBoundary.emplace_back(capU, angle);
+  }
+
+  void checkInitialTrim(const gp_Pnt& first, const gp_Vec& chord,
+                        double sharedU, double lag, double rimLag, int part,
+                        std::vector<gp_Pnt2d>& boundary)
+  {
+    if (lag <= 0.0)
+      return;
+    const double firstZ = profile(part, 0.0).z, lastZ = profile(part, 1.0).z;
+    const bool reversed = firstZ > lastZ;
+    const auto clearance = [&](double t, double u) {
+      const gp_Vec local(base, pose(first.Translated(u * chord), t));
+      const double z = local.Dot(axis);
+      if (z <= std::min(firstZ, lastZ) || z > width)
+        return -1.0;
+      double lo = 0.0, hi = 1.0;
+      for (int i = 0; i < 48; ++i)
+      {
+        const double mid = (lo + hi) / 2.0;
+        if (profile(part, reversed ? 1.0 - mid : mid).z < z)
+          lo = mid;
+        else
+          hi = mid;
+      }
+      const double v = (lo + hi) / 2.0;
+      return profile(part, reversed ? 1.0 - v : v).r
+             - std::sqrt(std::max(0.0, local.SquareMagnitude() - z * z));
+    };
+    double maxResidual = 0.0, endU = 0.0;
+    int matched = 0, planar = 0;
+    const auto acceleration = [&](const gp_Pnt& point) {
+      return vertical.Crossed(vertical.Crossed(gp_Vec(rotation.Location(), point))).Dot(axis);
+    };
+    const double start = acceleration(first);
+    const double end = acceleration(first.Translated(chord));
+    const double initialU = start / (start - end);
+    if (initialU < 0.0 || initialU > 1.0)
+      throw Standard_Failure("Initial trim does not approach an interior chord point");
+    boundary.emplace_back(initialU, 0.0);
+    for (int step = 1; step <= 33; ++step)
+    {
+      const double t = step == 33 ? (rimLag + lag) / 2.0 : lag * step / 32.0;
+      double bestDistance = 2.0, bestU = 0.0;
+      const double z0 = gp_Vec(base, pose(first, t)).Dot(axis);
+      const double z1 = gp_Vec(base, pose(first.Translated(chord), t)).Dot(axis);
+      const double planeU = (width - z0) / (z1 - z0);
+      const auto cap = profile(part, reversed ? 0.0 : 1.0);
+      if (planeU >= 0.0 && planeU <= 1.0)
+      {
+        const gp_Vec local(base, pose(first.Translated(planeU * chord), t));
+        const double r = (local - width * axis).Magnitude();
+        if (r <= cap.r && step < 32)
+        {
+          ++planar;
+          ++matched;
+          boundary.emplace_back(planeU, t);
+          continue;
+        }
+      }
+      std::vector<double> samples{0.0, 1.0};
+      for (int i = 1; i < 256; ++i)
+        samples.push_back(i / 256.0);
+      for (double delta = 1e-8; delta < 0.005; delta *= 2.0)
+      {
+        if (planeU - delta > 0.0 && planeU - delta < 1.0)
+          samples.push_back(planeU - delta);
+        if (planeU + delta > 0.0 && planeU + delta < 1.0)
+          samples.push_back(planeU + delta);
+      }
+      std::sort(samples.begin(), samples.end());
+      for (std::size_t i = 1; i < samples.size(); ++i)
+      {
+        double lo = samples[i - 1], hi = samples[i];
+        if (clearance(t, lo) <= 0.0 || clearance(t, hi) > 0.0)
+          continue;
+        for (int k = 0; k < 38; ++k)
+        {
+          const double mid = (lo + hi) / 2.0;
+          if (clearance(t, mid) > 0.0)
+            lo = mid;
+          else
+            hi = mid;
+        }
+        const double u = (lo + hi) / 2.0;
+        if (std::abs(clearance(t, u)) < 1e-8 && std::abs(u - sharedU) < bestDistance)
+        {
+          bestDistance = std::abs(u - sharedU);
+          bestU = u;
+        }
+      }
+      if (bestDistance > 1.0)
+        continue;
+      ++matched;
+      maxResidual = std::max(maxResidual, std::abs(clearance(t, bestU)));
+      if (step == 32)
+        endU = bestU;
+      else
+        boundary.emplace_back(bestU, t);
+    }
+    boundary.emplace_back(sharedU, lag);
+    const double zFirst = gp_Vec(base, pose(first, rimLag)).Dot(axis);
+    const double zLast = gp_Vec(base, pose(first.Translated(chord), rimLag)).Dot(axis);
+    boundary.emplace_back((width - zFirst) / (zLast - zFirst), rimLag);
+    std::sort(boundary.begin(), boundary.end(), [](const gp_Pnt2d& a, const gp_Pnt2d& b) {
+      return a.Y() < b.Y();
+    });
+  }
+
+  void findCapLateralContact(const gp_Pnt& first, const gp_Vec& chord,
+                             double capU, double lag, const gp_Pnt& rimPoint)
+  {
+    // Match the two generating curves in one wheel frame. Screw symmetry
+    // then carries the intersection point along a shared helix.
+    for (int part = 0; part < int(bands.size()); ++part)
+    {
+      if (std::min(std::abs(profile(part, 0.0).z - width),
+                   std::abs(profile(part, 1.0).z - width)) > Precision::Confusion())
+        continue;
+      for (const int branch : {-1, 1})
+      {
+        double u = capU, q = lag, v = 0.0;
+        double nearest = 1e100;
+        for (int i = 0; i <= 256; ++i)
+        {
+          const double station = i / 256.0;
+          const double distance = contact(part, 0.0, 1.0, branch, station).SquareDistance(rimPoint);
+          if (distance < nearest)
+          {
+            nearest = distance;
+            v = station;
+          }
+        }
+        v = std::clamp(v, 1e-5, 1.0 - 1e-5);
+        for (int i = 0; i < 32; ++i)
+        {
+          const auto source = moving(first.Translated(u * chord), q);
+          const gp_Pnt partner = contact(part, 0.0, 1.0, branch, v);
+          const gp_Vec error(source.point, partner);
+          if (error.Magnitude() < 1e-9)
+          {
+            const double eased = 0.5 * (1.0 - std::cos(pi * v));
+            if (discriminant(part, eased) < 0.0)
+              break;
+            capJoins.push_back({u, q, v, part, branch, {}, {}, lag});
+            checkInitialTrim(first, chord, u, q, lag, part, capJoins.back().initialBoundary);
+            checkFinalTrim(capJoins.back());
+            break;
+          }
+          const double step = 1e-6;
+          const double left = std::max(0.0, v - step), right = std::min(1.0, v + step);
+          const gp_Vec dv = gp_Vec(contact(part, 0.0, 1.0, branch, right),
+                                  contact(part, 0.0, 1.0, branch, left)) / (right - left);
+          const gp_Vec du = chord.Rotated(rotation, q);
+          const auto& dq = source.derivative;
+          const double determinant = du.Dot(dq.Crossed(dv));
+          if (std::abs(determinant) < 1e-15)
+            break;
+          const double deltaU = error.Dot(dq.Crossed(dv)) / determinant;
+          const double deltaQ = du.Dot(error.Crossed(dv)) / determinant;
+          const double deltaV = du.Dot(dq.Crossed(error)) / determinant;
+          bool advanced = false;
+          for (double scale = 1.0; scale >= 1.0 / 1024.0; scale *= 0.5)
+          {
+            const double nextU = u + scale * deltaU, nextQ = q + scale * deltaQ;
+            const double nextV = v + scale * deltaV;
+            if (nextU < 0.0 || nextU > 1.0 || nextV < 0.0 || nextV > 1.0
+                || std::abs(nextQ) >= angle || std::abs(nextQ) < 1e-4)
+              continue;
+            const auto p = pose(first.Translated(nextU * chord), nextQ);
+            if (p.SquareDistance(contact(part, 0.0, 1.0, branch, nextV)) >= error.SquareMagnitude())
+              continue;
+            u = nextU;
+            q = nextQ;
+            v = nextV;
+            advanced = true;
+            break;
+          }
+          if (!advanced)
+            break;
+        }
+      }
+    }
+  }
+
+  void findCapContacts(const gp_Pnt& first, const gp_Pnt& last, const gp_Pnt& center, double rim)
+  {
+    const gp_Vec chord(first, last);
+    const auto planeIntersection = [&](double relative) {
+      const double a = gp_Vec(center, pose(first, relative)).Dot(axis);
+      const double b = gp_Vec(center, pose(last, relative)).Dot(axis);
+      return a / (a - b);
+    };
+    const auto residual = [&](double relative) {
+      const double u = planeIntersection(relative);
+      return pose(first.Translated(u * chord), relative).Distance(center) - rim;
+    };
+    constexpr int stations = 2048;
+    for (int i = 2; i <= stations; ++i)
+    {
+      double lo = angle * (i - 1) / stations, hi = angle * i / stations;
+      const double previous = residual(lo), current = residual(hi);
+      if (!std::isfinite(previous) || !std::isfinite(current)
+          || (previous < 0.0) == (current < 0.0))
+        continue;
+      for (int k = 0; k < 48; ++k)
+      {
+        const double mid = (lo + hi) / 2.0;
+        if ((previous < 0.0) == (residual(mid) < 0.0))
+          lo = mid;
+        else
+          hi = mid;
+      }
+      const double relative = (lo + hi) / 2.0;
+      const double u = planeIntersection(relative);
+      if (!(u >= 0.0 && u <= 1.0) || std::abs(residual(relative)) > 1e-8)
+        continue;
+      findCapLateralContact(first, chord, u, relative, pose(first.Translated(u * chord), relative));
+    }
+  }
+
+  void addCap(BRepBuilderAPI_Sewing& sewing, bool front)
+  {
+    const double z = front ? width : 0.0;
+    const double radius = front ? frontFaceRadius : backFaceRadius;
+    const ContactEquation e = equation({z, radius, 1.0, 0.0});
+    const double amplitude = std::hypot(e.a, e.b);
+    const bool mixed = std::abs(e.c) < amplitude;
+    const double phase = std::atan2(e.b, e.a);
+    const double half = mixed ? std::acos(-e.c / amplitude) : pi;
+    const double first = phase - half;
+    const double last = phase + half;
+    const gp_Pnt center = base.Translated(z * axis);
+    const auto point = [&](double phi) {
+      return center.Translated(radius * (std::cos(phi) * radialX + std::sin(phi) * radialY));
+    };
+    for (const bool atEnd : {false, true})
+    {
+      const bool positive = atEnd == front;
+      if (!mixed && positive != (e.c > 0.0))
+        continue;
+      const double t = atEnd ? angle : 0.0;
+      const gp_Circ circle(gp_Ax2(pose(center,t), gp_Dir(axis.Rotated(rotation,t)),
+                                 gp_Dir(radialX.Rotated(rotation,t))), radius);
+      BRepBuilderAPI_MakeWire wire;
+      if (mixed)
+      {
+        const double a = positive ? first : last;
+        const double b = positive ? last : first + 2.0*pi;
+        BRepBuilderAPI_MakeEdge arc(circle, a, b);
+        BRepBuilderAPI_MakeEdge chord(pose(point(b),t), pose(point(a),t));
+        wire.Add(arc.Edge());
+        wire.Add(chord.Edge());
+      }
+      else
+      {
+        BRepBuilderAPI_MakeEdge rim(circle);
+        wire.Add(rim.Edge());
+      }
+      addPatch(sewing, BRepBuilderAPI_MakeFace(wire.Wire()).Face(),
+               front ? "front cap" : "back cap", -1, t, t, atEnd);
+    }
+    if (mixed)
+    {
+      const gp_Pnt ends[] = {point(first), point(last)};
+      if (front)
+        findCapContacts(ends[0], ends[1], center, radius);
+      const auto patch = surface(1.0, 1, 1, angle, timeIntervals, 3, [&](int i) {
+        return hermite(angle, timeIntervals, [&](double t) { return moving(ends[i], t); });
+      });
+      BRepBuilderAPI_MakeFace face(patch, 0.0, 1.0, 0.0, angle, 1.0e-7);
+      if (!face.IsDone() || !BRepCheck_Analyzer(face.Face()).IsValid())
+        throw Standard_Failure("Local cap trim produced an invalid face");
+      addPatch(sewing, face.Face(), front ? "front chord" : "back chord", -1, 0, angle, 0);
+    }
+  }
+
+  struct InputPatch
+  {
+    TopoDS_Face face;
+    const char* kind;
+    int part;
+    double first;
+    double last;
+    int side;
+  };
+  std::vector<InputPatch> inputPatches;
+  struct LateralJoin
+  {
+    const InputPatch* first;
+    const InputPatch* second;
+    double u, v, lag;
+    bool keepLowFirst, keepLowSecond;
+  };
+  std::vector<LateralJoin> backJoins;
+
+  void findBackTrimJoins(const TopoDS_Solid& body)
+  {
+    // Removing the axial advance and rotation maps each screw orbit to one
+    // point in a plane normal to the screw axis.
+    const BRepSolidSweep::ScrewOrbitCoordinates coordinates(rotation, rise);
+    BRepSolidSweep::OrbitIntersector occupancy(body, 1.0e-7);
+    const auto point = [&](const InputPatch& p, double u) {
+      return p.part >= 0 ? contact(p.part, p.first, p.last, p.side, u)
+                         : BRep_Tool::Surface(p.face)->Value(u, 0.0);
+    };
+    const auto exposed = [&](const InputPatch& patch, double u, double t) {
+      const auto contactPoint = point(patch, u);
+      gp_Vec normal = -axis;
+      if (patch.part >= 0)
+      {
+        const double station = patch.first + (patch.last - patch.first)
+                               * (0.5 * (1.0 - std::cos(pi * u)));
+        const auto meridian = profile(patch.part, station);
+        const gp_Vec radial(base.Translated(meridian.z * axis), contactPoint);
+        normal = meridian.nz * axis + meridian.nr * radial.Normalized();
+      }
+      const auto outside = contactPoint.Translated(2.5e-6 * normal);
+      return occupancy.Occupied(outside, rotation, rise, t - angle, t).empty();
+    };
+    constexpr int steps = 128;
+    struct Trace
+    {
+      const InputPatch* patch;
+      std::array<gp_Pnt2d, steps + 1> samples;
+    };
+    std::vector<Trace> traces;
+    for (const auto& patch : inputPatches)
+    {
+      const std::string_view kind = patch.kind;
+      if (kind != "lateral contact" && kind != "back chord")
+        continue;
+      auto& trace = traces.emplace_back(Trace{&patch, {}});
+      for (int i = 0; i <= steps; ++i)
+        trace.samples[i] = coordinates.Key(point(patch, double(i) / steps));
+    }
+    for (std::size_t i = 0; i < traces.size(); ++i)
+    {
+      for (std::size_t j = i; j < traces.size(); ++j)
+      {
+        const auto& a = traces[i];
+        const auto& b = traces[j];
+        for (int k = 0; k < steps; ++k)
+        {
+          const gp_Vec2d da(a.samples[k], a.samples[k + 1]);
+          for (int l = i == j ? k + 2 : 0; l < steps; ++l)
+          {
+            const gp_Vec2d db(b.samples[l], b.samples[l + 1]);
+            const double determinant = da.Crossed(db);
+            if (std::abs(determinant) < 1e-15)
+              continue;
+            const gp_Vec2d delta(a.samples[k], b.samples[l]);
+            const double ka = delta.Crossed(db) / determinant;
+            const double kb = delta.Crossed(da) / determinant;
+            if (ka < 0.0 || ka > 1.0 || kb < 0.0 || kb > 1.0)
+              continue;
+            double u = (k + ka) / steps, v = (l + kb) / steps;
+            const auto fa = [&](double t) { return coordinates.Key(point(*a.patch, t)); };
+            const auto fb = [&](double t) { return coordinates.Key(point(*b.patch, t)); };
+            for (int it = 0; it < 12; ++it)
+            {
+              const gp_Vec2d error(fa(u), fb(v));
+              if (error.Magnitude() < 1e-11)
+                break;
+              constexpr double h = 1e-6;
+              const gp_Vec2d du(fa(u - h), fa(u + h)), dv(fb(v - h), fb(v + h));
+              const double d = du.Crossed(dv);
+              if (std::abs(d) < 1e-20)
+                break;
+              u += 2.0 * h * error.Crossed(dv) / d;
+              v += 2.0 * h * error.Crossed(du) / d;
+              if (!(u > 0.0 && u < 1.0 && v > 0.0 && v < 1.0))
+                break;
+            }
+            if (!(u > 1e-5 && u < 1.0 - 1e-5 && v > 1e-5 && v < 1.0 - 1e-5))
+              continue;
+            const auto p = point(*a.patch, u), q = point(*b.patch, v);
+            const double lag = coordinates.Lag(p, q);
+            if (std::abs(lag) <= 1e-5 || std::abs(lag) >= angle)
+              continue;
+            const double gap = pose(p, lag).Distance(q);
+            if (gap > 1e-8)
+              continue;
+            const double timeA = (angle + lag) / 2.0;
+            const double timeB = (angle - lag) / 2.0;
+            constexpr double flank = 0.01;
+            const auto side = [&](const InputPatch& patch, double x, double t) {
+              return std::array{
+                exposed(patch, std::max(0.0, x - flank), t) ? 'E' : 'B',
+                exposed(patch, std::min(1.0, x + flank), t) ? 'E' : 'B'};
+            };
+            const auto sidesA = side(*a.patch, u, timeA), sidesB = side(*b.patch, v, timeB);
+            if (a.patch->part >= 0 && b.patch->part >= 0
+                && sidesA[0] != sidesA[1] && sidesB[0] != sidesB[1])
+              backJoins.push_back({a.patch, b.patch, u, v, lag,
+                                   sidesA[0] == 'E', sidesB[0] == 'E'});
+          }
+        }
+      }
+    }
+  }
+
+  struct EndpointTrace
+  {
+    std::vector<gp_Pnt2d> points;
+    std::vector<int> seamVertices;
+    std::vector<int> supports;
+    double fixedTime = 0.0;
+  };
+  EndpointTrace traceEndpoint(const InputPatch& patch, double seamU, bool keepLow,
+                                 double first, double last, bool atStart)
+  {
+    int matched = 0;
+    double residual = 0.0;
+    double previous = seamU;
+    EndpointTrace trace;
+    trace.points.emplace_back(seamU, atStart ? last : first);
+    auto& boundary = trace.points;
+    const double fixedTime = atStart ? 0.0 : angle;
+    trace.fixedTime = fixedTime;
+    const auto inEndpointFrame = [&](double u, double t) {
+      return pose(contact(patch.part, patch.first, patch.last, patch.side, u), t - fixedTime);
+    };
+    int priorSupport = endpointClearance(inEndpointFrame(seamU, boundary.front().Y())).support;
+    const auto meridianCoordinates = [&](const gp_Pnt2d& uv) {
+      const gp_Vec vector(base, inEndpointFrame(uv.X(), uv.Y()));
+      const double z = vector.Dot(axis);
+      return gp_Pnt2d(z, (vector - z * axis).Magnitude());
+    };
+
+    // Insert the common vertex at the intersection of the moving patch
+    // and the circle where the two stationary meridian bands meet.
+    const auto splitAtSupport = [&](int from, int to, const gp_Pnt2d& next) {
+      const auto capPoint = [&](int support) {
+        return support == -1 ? gp_Pnt2d(0.0, backFaceRadius) : gp_Pnt2d(width, frontFaceRadius);
+      };
+      const auto bounds = [&](int support) -> std::array<gp_Pnt2d, 2> {
+        if (support < 0)
+          return {capPoint(support), capPoint(support)};
+        const auto first = profile(support, 0.0), last = profile(support, 1.0);
+        return {gp_Pnt2d(first.z, first.r), gp_Pnt2d(last.z, last.r)};
+      };
+      gp_Pnt2d rim;
+      double gap = RealLast();
+      for (const auto& a : bounds(from))
+        for (const auto& b : bounds(to))
+          if (a.Distance(b) < gap)
+          {
+            gap = a.Distance(b);
+            rim = a;
+          }
+      if (gap > Precision::Confusion())
+        throw Standard_Failure("Endpoint trim skipped a stationary face");
+
+      const auto previous = boundary.back();
+      gp_Pnt2d uv((previous.X() + next.X()) * 0.5, (previous.Y() + next.Y()) * 0.5);
+      for (int iteration = 0; iteration < 20; ++iteration)
+      {
+        const auto point = meridianCoordinates(uv);
+        const gp_Vec2d error(rim, point);
+        if (error.Magnitude() < 1e-10)
+        {
+          if (uv.Y() < std::min(previous.Y(), next.Y())
+              || uv.Y() > std::max(previous.Y(), next.Y()))
+            break;
+          trace.seamVertices.push_back(int(boundary.size()));
+          trace.supports.push_back(from);
+          boundary.push_back(uv);
+          return;
+        }
+        const double h = 1e-6;
+        const gp_Vec2d du(meridianCoordinates(gp_Pnt2d(uv.X() - h, uv.Y())),
+                          meridianCoordinates(gp_Pnt2d(uv.X() + h, uv.Y())));
+        const gp_Vec2d dt(meridianCoordinates(gp_Pnt2d(uv.X(), uv.Y() - h)),
+                          meridianCoordinates(gp_Pnt2d(uv.X(), uv.Y() + h)));
+        const double determinant = du.Crossed(dt);
+        if (std::abs(determinant) < 1e-20)
+          break;
+        uv.SetX(uv.X() - 2.0 * h * error.Crossed(dt) / determinant);
+        uv.SetY(uv.Y() - 2.0 * h * du.Crossed(error) / determinant);
+      }
+      throw Standard_Failure("Endpoint trim could not intersect stationary face seam");
+    };
+    constexpr int timeSteps = 32, stations = 256;
+    for (int step = 1; step <= timeSteps + 1; ++step)
+    {
+      const double fraction = step < timeSteps ? step / double(timeSteps)
+                              : step == timeSteps ? 0.99 : 0.999;
+      const double t = atStart ? last - (last - first) * fraction
+                               : first + (last - first) * fraction;
+      const auto clearance = [&](double u) {
+        return endpointClearance(inEndpointFrame(u, t));
+      };
+      double next = previous, nearest = 2.0;
+      bool left = clearance(0.0).distance < 0.0;
+      for (int i = 1; i <= stations; ++i)
+      {
+        const bool right = clearance(i / double(stations)).distance < 0.0;
+        if (left != right && right == keepLow)
+        {
+          double lo = (i - 1.0) / stations, hi = i / double(stations);
+          for (int k = 0; k < 32; ++k)
+          {
+            const double mid = (lo + hi) / 2.0;
+            if ((clearance(mid).distance < 0.0) == left)
+              lo = mid;
+            else
+              hi = mid;
+          }
+          const double u = (lo + hi) / 2.0;
+          if (std::abs(u - previous) < nearest)
+          {
+            nearest = std::abs(u - previous);
+            next = u;
+          }
+        }
+        left = right;
+      }
+      if (nearest < 2.0)
+      {
+        previous = next;
+        ++matched;
+        const auto contact = clearance(next);
+        residual = std::max(residual, std::abs(contact.distance));
+        if (contact.support != priorSupport)
+        {
+          splitAtSupport(priorSupport, contact.support, gp_Pnt2d(next, t));
+          priorSupport = contact.support;
+        }
+        boundary.emplace_back(next, t);
+      }
+    }
+    if (matched < timeSteps - 1 || std::min(previous, 1.0 - previous) > 0.1)
+      throw Standard_Failure("Could not follow the back trim to the end of the motion");
+    const double limit = previous < 0.5 ? 0.0 : 1.0;
+    boundary.emplace_back(limit, atStart ? first : last);
+    trace.supports.push_back(priorSupport);
+    if (atStart)
+    {
+      std::reverse(boundary.begin(), boundary.end());
+      for (auto& index : trace.seamVertices)
+        index = int(boundary.size()) - 1 - index;
+      std::reverse(trace.seamVertices.begin(), trace.seamVertices.end());
+      std::reverse(trace.supports.begin(), trace.supports.end());
+    }
+    return trace;
+  }
+
+  occ::handle<Geom2d_BSplineCurve> fitEndpointTrim(
+    const occ::handle<Geom_Surface>& support, const std::vector<gp_Pnt2d>& boundary,
+    int first, int last, const occ::handle<Geom_Surface>& stationary, double tolerance)
+  {
+    std::vector<gp_Pnt2d> samples(boundary.begin() + first, boundary.begin() + last + 1);
+    const auto plane = occ::handle<Geom_Plane>::DownCast(stationary);
+    const auto distance = [&](const gp_Pnt2d& uv) {
+      const gp_Pnt p = support->Value(uv.X(), uv.Y());
+      if (!plane.IsNull())
+        return gp_Vec(plane->Location(), p).Dot(gp_Vec(plane->Axis().Direction()));
+
+      GeomAPI_ProjectPointOnSurf project(p, stationary, 1e-9);
+      if (!project.IsDone() || project.NbPoints() == 0)
+        throw Standard_Failure("Could not locate the stationary surface projection");
+      double u, v;
+      project.LowerDistanceParameters(u, v);
+      gp_Pnt projected;
+      gp_Vec du, dv;
+      stationary->D1(u, v, projected, du, dv);
+      return gp_Vec(projected, p).Dot(du.Crossed(dv).Normalized());
+    };
+    const auto correct = [&](gp_Pnt2d uv) {
+      for (int i = 0; i < 20; ++i)
+      {
+        const double error = distance(uv);
+        if (std::abs(error) <= 0.01 * tolerance)
+          return uv;
+        constexpr double h = 1e-5;
+        const double low = std::max(0.0, uv.X() - h), high = std::min(1.0, uv.X() + h);
+        const double derivative = (distance(gp_Pnt2d(high, uv.Y()))
+                                   - distance(gp_Pnt2d(low, uv.Y()))) / (high - low);
+        if (std::abs(derivative) <= Precision::Confusion())
+          break;
+        const double next = std::clamp(uv.X() - error / derivative, 0.0, 1.0);
+        if (next == uv.X())
+          break;
+        uv.SetX(next);
+      }
+      return uv;
+    };
+
+    if (!stationary.IsNull())
+    {
+      for (std::size_t i = 1; i + 1 < samples.size(); ++i)
+        samples[i] = correct(samples[i]);
+    }
+    for (int attempt = 0; attempt < 8; ++attempt)
+    {
+      const int count = int(samples.size());
+      const auto points = occ::handle<NCollection_HArray1<gp_Pnt2d>>(
+        new NCollection_HArray1<gp_Pnt2d>(1, count));
+      const auto parameters = occ::handle<NCollection_HArray1<double>>(
+        new NCollection_HArray1<double>(1, count));
+      for (int i = 1; i <= count; ++i)
+      {
+        points->SetValue(i, samples[i - 1]);
+        parameters->SetValue(i, samples[i - 1].Y());
+      }
+      Geom2dAPI_Interpolate fit(points, parameters, false, 1e-10);
+      fit.Perform();
+      if (!fit.IsDone())
+        throw Standard_Failure("Could not fit a stationary endpoint intersection");
+      if (stationary.IsNull())
+        return fit.Curve();
+
+      std::vector<gp_Pnt2d> refined;
+      double worst = 0.0, worstTime = 0.0;
+      for (std::size_t i = 1; i < samples.size(); ++i)
+      {
+        refined.push_back(samples[i - 1]);
+        for (int j = 1; j <= 3; ++j)
+        {
+          const double t = samples[i - 1].Y() + (samples[i].Y() - samples[i - 1].Y()) * j / 4.0;
+          const auto point = fit.Curve()->Value(t);
+          const double residual = std::abs(distance(point));
+          if (residual > worst)
+          {
+            worst = residual;
+            worstTime = t;
+          }
+          if (residual > 0.2 * tolerance)
+            refined.push_back(correct(gp_Pnt2d(point.X(), t)));
+        }
+      }
+      if (worst <= 0.2 * tolerance)
+      {
+        return fit.Curve();
+      }
+      refined.push_back(samples.back());
+      samples = std::move(refined);
+    }
+    throw Standard_Failure("Endpoint intersection missed the fit tolerance");
+  }
+
+  TopoDS_Solid checkBackTrim(const TopoDS_Solid& frontTrimmed, double tolerance, const TopoDS_Solid& body)
+  {
+    if (backJoins.size() != 1)
+      throw Standard_Failure("Expected one exposed lateral join near the back cap");
+    const auto& join = backJoins.front();
+    const auto first = BRep_Tool::Surface(join.first->face);
+    const auto second = BRep_Tool::Surface(join.second->face);
+    const auto backChord = std::find_if(inputPatches.begin(), inputPatches.end(), [](const auto& p) {
+      return std::string_view(p.kind) == "back chord";
+    });
+    if (backChord == inputPatches.end())
+      throw Standard_Failure("Missing back cap chord");
+    const auto buried = BRep_Tool::Surface(backChord->face);
+    const double start = std::max(0.0, join.lag), end = std::min(angle, angle + join.lag);
+    // Outside the common helical span, the competing pose is constrained by
+    // the finite motion. Check its stationary wheel surface before fitting a
+    // continuation of the trim.
+    EndpointTrace initial, final;
+    if (join.lag > 0.0)
+    {
+      initial = traceEndpoint(*join.first, join.u, join.keepLowFirst, 0.0, start, true);
+      final = traceEndpoint(*join.second, join.v, join.keepLowSecond, end - join.lag, angle, false);
+    }
+    else
+    {
+      initial = traceEndpoint(*join.second, join.v, join.keepLowSecond, 0.0, start - join.lag, true);
+      final = traceEndpoint(*join.first, join.u, join.keepLowFirst, end, angle, false);
+    }
+    BRepBuilderAPI_Sewing sewing(0.8 * tolerance);
+    TopoDS_Face firstStrip, secondStrip;
+    for (TopExp_Explorer faces(frontTrimmed, TopAbs_FACE); faces.More(); faces.Next())
+    {
+      const auto& face = TopoDS::Face(faces.Current());
+      const auto support = BRep_Tool::Surface(face);
+      if (support == buried)
+        continue;
+      if (support != first && support != second)
+      {
+        sewing.Add(face);
+        continue;
+      }
+      const bool onFirst = support == first;
+      const double t0 = onFirst ? start : start - join.lag;
+      const double t1 = onFirst ? end : end - join.lag;
+      const double u = onFirst ? join.u : join.v;
+      const bool low = onFirst ? join.keepLowFirst : join.keepLowSecond;
+      const auto add = [&](double u0, double u1, double v0, double v1) {
+        BRepBuilderAPI_MakeFace trimmed(support, u0, u1, v0, v1, Precision::Confusion());
+        if (!trimmed.IsDone())
+          throw Standard_Failure("Could not bound a back trim face");
+        sewing.Add(trimmed.Face());
+        return trimmed.Face();
+      };
+      const auto addEndpoint = [&](const EndpointTrace& trace) {
+        const auto& boundary = trace.points;
+        BRepBuilderAPI_MakeWire wire;
+        int segmentIndex = 0;
+        const auto addTrimEdge = [&](int first, int last) {
+          const int owner = trace.supports.at(segmentIndex++);
+          occ::handle<Geom_Surface> trimSurface;
+          // Curved segments with an interior trace already carry enough
+          // constrained samples. A rim segment with only two endpoints
+          // needs samples along the actual surface intersection.
+          if (owner < 0 || last - first <= 2)
+          {
+            for (const auto& fixed : inputPatches)
+            {
+              const bool sameEndpoint = (fixed.side != 0) == (trace.fixedTime != 0.0);
+              const std::string_view kind(fixed.kind);
+              const bool sameFace = owner >= 0 ? kind == "endpoint band" && fixed.part == owner
+                                              : kind == (owner == -1 ? "back cap" : "front cap");
+              if (sameEndpoint && sameFace)
+              {
+                trimSurface = BRep_Tool::Surface(fixed.face);
+                break;
+              }
+            }
+          }
+          const auto fitted = fitEndpointTrim(support, boundary, first, last, trimSurface, tolerance);
+          const TopoDS_Edge edge = BRepBuilderAPI_MakeEdge(fitted, support).Edge();
+          if (!BRepLib::BuildCurve3d(edge, 0.1 * tolerance))
+            throw Standard_Failure("Could not build a 3D endpoint trim edge");
+          bool attached = false;
+          for (const auto& fixed : inputPatches)
+          {
+            const std::string_view kind = fixed.kind;
+            const bool sameEndpoint = (fixed.side != 0) == (trace.fixedTime != 0.0);
+            const bool sameFace = owner >= 0
+              ? kind == "endpoint band" && fixed.part == owner
+              : kind == (owner == -1 ? "back cap" : "front cap");
+            if (!sameEndpoint || !sameFace)
+              continue;
+            const auto stationary = BRep_Tool::Surface(fixed.face);
+            double from, to;
+            const auto curve = BRep_Tool::Curve(edge, from, to);
+            double projectionTolerance = 0.0;
+            const auto plane = occ::handle<Geom_Plane>::DownCast(stationary);
+            auto pcurve = plane.IsNull()
+              ? GeomProjLib::Curve2d(curve, from, to, stationary, projectionTolerance)
+              : GeomAPI::To2d(curve, plane->Pln());
+            const auto checkProjection = [&](const occ::handle<Geom2d_Curve>& projected) {
+              if (projected.IsNull())
+                return RealLast();
+              double residual = 0.0;
+              for (int i = 0; i <= 64; ++i)
+              {
+                const double t = from + (to - from) * i / 64.0;
+                const gp_Pnt2d p = projected->Value(t);
+                residual = std::max(residual, stationary->Value(p.X(), p.Y()).Distance(curve->Value(t)));
+              }
+              return residual;
+            };
+            double residual = checkProjection(pcurve);
+            if (residual > 0.5 * tolerance && plane.IsNull())
+            {
+              constexpr int count = 17;
+              const auto points = occ::handle<NCollection_HArray1<gp_Pnt2d>>(
+                new NCollection_HArray1<gp_Pnt2d>(1, count));
+              const auto parameters = occ::handle<NCollection_HArray1<double>>(
+                new NCollection_HArray1<double>(1, count));
+              bool complete = true;
+              for (int i = 1; i <= count; ++i)
+              {
+                const double t = from + (to - from) * (i - 1) / (count - 1.0);
+                GeomAPI_ProjectPointOnSurf project(curve->Value(t), stationary, 1e-9);
+                if (!project.IsDone() || project.NbPoints() == 0)
+                {
+                  complete = false;
+                  break;
+                }
+                double u, v;
+                project.LowerDistanceParameters(u, v);
+                if (i > 1 && stationary->IsUPeriodic())
+                {
+                  const double period = stationary->UPeriod();
+                  u += period * std::round((points->Value(i - 1).X() - u) / period);
+                }
+                points->SetValue(i, gp_Pnt2d(u, v));
+                parameters->SetValue(i, t);
+              }
+              if (complete)
+              {
+                Geom2dAPI_Interpolate fit(points, parameters, false, 1e-10);
+                fit.Perform();
+                if (fit.IsDone())
+                {
+                  const double fittedResidual = checkProjection(fit.Curve());
+                  if (fittedResidual < residual)
+                  {
+                    residual = fittedResidual;
+                    pcurve = fit.Curve();
+                  }
+                }
+              }
+            }
+            if (residual > 0.5 * tolerance)
+            {
+              continue;
+            }
+            BRep_Builder builder;
+            builder.UpdateEdge(edge, pcurve, fixed.face, std::max(residual, Precision::Confusion()));
+            builder.Range(edge, fixed.face, from, to);
+            attached = true;
+          }
+          wire.Add(edge);
+        };
+        int first = 0;
+        for (const int last : trace.seamVertices)
+        {
+          addTrimEdge(first, last);
+          first = last;
+        }
+        addTrimEdge(first, int(boundary.size()) - 1);
+        const double outer = low ? 0.0 : 1.0;
+        const gp_Pnt2d last(outer, boundary.back().Y()), firstPoint(outer, boundary.front().Y());
+        const auto segment = [&](const gp_Pnt2d& a, const gp_Pnt2d& b) {
+          if (a.Distance(b) > Precision::PConfusion())
+            wire.Add(BRepBuilderAPI_MakeEdge(GC_MakeSegment2d(a, b).Value(), support).Edge());
+        };
+        segment(boundary.back(), last);
+        segment(last, firstPoint);
+        segment(firstPoint, boundary.front());
+        BRepBuilderAPI_MakeFace trimmed(support, wire.Wire(), true);
+        if (!trimmed.IsDone() || !BRepLib::BuildCurves3d(trimmed.Face(), 1e-6)
+            || !BRepCheck_Analyzer(trimmed.Face()).IsValid())
+          throw Standard_Failure("Could not build a finite-motion back trim face");
+        sewing.Add(trimmed.Face());
+      };
+      if (t0 > Precision::Confusion())
+        addEndpoint(initial);
+      if (angle - t1 > Precision::Confusion())
+        addEndpoint(final);
+      (onFirst ? firstStrip : secondStrip) = add(low ? 0.0 : u, low ? u : 1.0, t0, t1);
+    }
+    if (firstStrip.IsNull() || secondStrip.IsNull())
+      throw Standard_Failure("Back trim support faces could not be recovered");
+    sewing.Perform();
+    const auto& a = sewing.IsModified(firstStrip) ? sewing.Modified(firstStrip) : firstStrip;
+    const auto& b = sewing.IsModified(secondStrip) ? sewing.Modified(secondStrip) : secondStrip;
+    int shared = 0;
+    for (TopExp_Explorer ea(a, TopAbs_EDGE); ea.More(); ea.Next())
+      for (TopExp_Explorer eb(b, TopAbs_EDGE); eb.More(); eb.Next())
+        shared += ea.Current().IsSame(eb.Current());
+    if (shared != 1)
+      throw Standard_Failure("The exposed lateral faces did not share their back trim edge");
+    TopoDS_Shape shell = sewing.SewedShape();
+    std::vector<TopoDS_Edge> freeEdges;
+    const auto hasOnlyLateralSupports = [](const EndpointTrace& trace) {
+      return std::all_of(trace.supports.begin(), trace.supports.end(), [](int part) { return part >= 0; });
+    };
+    const bool multiband = hasOnlyLateralSupports(initial) && hasOnlyLateralSupports(final);
+    if (multiband)
+    {
+      BRepSolidSweep::OrbitIntersector oracle(body, 1e-7);
+      const auto original = sewing.SewedShape();
+      BRepBuilderAPI_Sewing exterior(0.8 * tolerance);
+      for (TopExp_Explorer ex(original, TopAbs_FACE); ex.More(); ex.Next())
+      {
+        const auto face = TopoDS::Face(ex.Current());
+        double u0, u1, v0, v1;
+        BRepTools::UVBounds(face, u0, u1, v0, v1);
+        const auto surf = BRep_Tool::Surface(face);
+        int coveredSamples = 0, samples = 0;
+        for (int k = 0; k < 49; ++k)
+        {
+          const gp_Pnt2d uv(u0 + (u1-u0) * (k%7+.5)/7., v0 + (v1-v0) * (k/7+.5)/7.);
+          if (BRepClass_FaceClassifier(face, uv, 1e-8).State() != TopAbs_IN)
+            continue;
+          gp_Pnt p;
+          gp_Vec du, dv;
+          surf->D1(uv.X(), uv.Y(), p, du, dv);
+          gp_Vec n = du.Crossed(dv);
+          if (n.Magnitude() <= 1e-10)
+            continue;
+          ++samples;
+          n.Normalize();
+          int sides = 0;
+          for (const auto sign : {-1.0, 1.0})
+            sides += !oracle.Occupied(p.Translated(sign * tolerance * n), rotation, rise,
+                                      -angle, 0).empty();
+          coveredSamples += sides == 2;
+        }
+        if (samples == 0 || coveredSamples != samples)
+          exterior.Add(face);
+      }
+      exterior.Perform();
+      shell = exterior.SewedShape();
+      for (int i = 1; i <= exterior.NbFreeEdges(); ++i)
+        freeEdges.push_back(exterior.FreeEdge(i));
+    }
+    else
+    {
+      for (int i = 1; i <= sewing.NbFreeEdges(); ++i)
+        freeEdges.push_back(sewing.FreeEdge(i));
+    }
+    struct Gap
+    {
+      TopoDS_Edge edge;
+      const InputPatch* owner;
+      std::array<gp_Pnt, 2> ends;
+    };
+    std::vector<Gap> gaps;
+    for (const auto& edge : freeEdges)
+    {
+      for (TopExp_Explorer f(shell, TopAbs_FACE); f.More(); f.Next())
+      {
+        const auto sf = BRep_Tool::Surface(TopoDS::Face(f.Current()));
+        for (TopExp_Explorer e(f.Current(), TopAbs_EDGE); e.More(); e.Next())
+        {
+          if (!e.Current().IsSame(edge))
+            continue;
+          const auto owner = std::find_if(inputPatches.begin(), inputPatches.end(), [&](const auto& p) {
+            return BRep_Tool::Surface(p.face) == sf;
+          });
+          TopoDS_Vertex v1, v2;
+          TopExp::Vertices(edge, v1, v2);
+          gaps.push_back({edge, owner == inputPatches.end() ? nullptr : &*owner,
+                          {BRep_Tool::Pnt(v1), BRep_Tool::Pnt(v2)}});
+        }
+      }
+    }
+    const auto connection = [&](const Gap& a, const Gap& b) -> std::optional<gp_Pnt> {
+      for (const auto& p : a.ends)
+        for (const auto& q : b.ends)
+          if (p.Distance(q) < 0.5 * tolerance)
+            return p;
+      return std::nullopt;
+    };
+    BRepBuilderAPI_Sewing completed(0.8 * tolerance);
+    BRepBuilderAPI_Sewing* target = &completed;
+    for (TopExp_Explorer f(shell, TopAbs_FACE); f.More(); f.Next())
+      completed.Add(f.Current());
+    const auto add = [&](const InputPatch& owner, const std::vector<TopoDS_Edge>& edges) {
+      const auto& a = edges.front();
+      const auto surface = occ::handle<Geom_Surface>::DownCast(BRep_Tool::Surface(owner.face)->Copy());
+      double u0, u1, v0, v1;
+      BRepTools::UVBounds(owner.face, u0, u1, v0, v1);
+      BRepBuilderAPI_MakeWire wire;
+      std::vector<std::pair<gp_Pnt, gp_Pnt2d>> anchors;
+      for (const auto& edge : edges)
+      {
+        double from, to;
+        const auto curve = BRep_Tool::Curve(edge, from, to);
+        double uvFrom, uvTo;
+        occ::handle<Geom2d_Curve> uv;
+        if (edge.IsSame(a) || (multiband && edge.IsSame(edges.back())))
+        {
+          const auto original = BRep_Tool::CurveOnSurface(edge, owner.face, uvFrom, uvTo);
+          if (!original.IsNull())
+            uv = occ::handle<Geom2d_Curve>::DownCast(original->Copy());
+        }
+        {
+          if (uv.IsNull())
+          {
+          double fit = tolerance * 0.2;
+          const auto plane = occ::handle<Geom_Plane>::DownCast(surface);
+          uv = plane.IsNull() ? GeomProjLib::Curve2d(curve, from, to, surface, fit)
+                              : GeomAPI::To2d(curve, plane->Pln());
+          if (!plane.IsNull() ? uv.IsNull() || fit > tolerance * 0.5 : true)
+          {
+            const int count = multiband ? 65 : 17;
+            const auto points = occ::handle<NCollection_HArray1<gp_Pnt2d>>(
+              new NCollection_HArray1<gp_Pnt2d>(1, count));
+            const auto parameters = occ::handle<NCollection_HArray1<double>>(
+              new NCollection_HArray1<double>(1, count));
+            fit = 0;
+            for (int i = 1; i <= count; ++i)
+            {
+              const double t = from + (to - from) * (i - 1) / (count - 1.0);
+              GeomAPI_ProjectPointOnSurf projection(curve->Value(t), surface, 1e-9);
+              if (!projection.IsDone() || projection.NbPoints() == 0)
+                throw Standard_Failure("Could not project a closure sample");
+              double u, v;
+              projection.LowerDistanceParameters(u, v);
+              if (i > 1 && surface->IsUPeriodic())
+              {
+                const auto period = surface->UPeriod();
+                u += period * std::round((points->Value(i - 1).X() - u) / period);
+              }
+              if (i > 1 && surface->IsVPeriodic())
+              {
+                const double period = surface->VPeriod();
+                v += period * std::round((points->Value(i - 1).Y() - v) / period);
+              }
+              if (i == 1 || i == count)
+              {
+                for (const auto& anchor : anchors)
+                  if (anchor.first.Distance(curve->Value(t)) < 0.5 * tolerance)
+                  {
+                    const double period = surface->IsUPeriodic() ? surface->UPeriod() : 0.0;
+                    u = anchor.second.X() + (period == 0.0 ? 0.0 :
+                      period * std::round((u - anchor.second.X()) / period));
+                    const double vPeriod = surface->IsVPeriodic() ? surface->VPeriod() : 0.0;
+                    v = anchor.second.Y() + (vPeriod == 0.0 ? 0.0 :
+                      vPeriod * std::round((v - anchor.second.Y()) / vPeriod));
+                    break;
+                  }
+              }
+              points->SetValue(i, gp_Pnt2d(u, v));
+              parameters->SetValue(i, t);
+              fit = std::max(fit, projection.LowerDistance());
+            }
+            if (fit > tolerance * 0.5)
+              throw Standard_Failure("Could not project a closure edge to its endpoint face");
+            Geom2dAPI_Interpolate fitCurve(points, parameters, false, 1e-10);
+            fitCurve.Perform();
+            uv = fitCurve.Curve();
+          }
+          }
+          BRep_Builder builder;
+          if (surface->IsUPeriodic())
+          {
+            const double period = surface->UPeriod();
+            const double middle = uv->Value((from + to) / 2).X();
+            uv->Translate(gp_Vec2d(period * std::round(((u0 + u1) / 2 - middle) / period), 0));
+          }
+          if (surface->IsVPeriodic())
+          {
+            const double period = surface->VPeriod();
+            const double middle = uv->Value((from + to) / 2).Y();
+            uv->Translate(gp_Vec2d(0, period * std::round(((v0 + v1) / 2 - middle) / period)));
+          }
+          double residual = 0.0;
+          for (int i = 0; i <= 64; ++i)
+          {
+            const double t = from + (to - from) * i / 64.0;
+            const auto xy = uv->Value(t);
+            residual = std::max(residual, surface->Value(xy.X(), xy.Y()).Distance(curve->Value(t)));
+          }
+          if (residual > tolerance * 0.5)
+            throw Standard_Failure(("Closure pcurve residual " + std::to_string(residual)
+                                    + " on " + owner.kind + " anchors " + std::to_string(anchors.size())).c_str());
+          builder.UpdateEdge(edge, uv, surface, TopLoc_Location(), std::max(residual, Precision::Confusion()));
+          builder.Range(edge, surface, TopLoc_Location(), from, to);
+          anchors.push_back({curve->Value(from), uv->Value(from)});
+          anchors.push_back({curve->Value(to), uv->Value(to)});
+        }
+        wire.Add(edge);
+      }
+      if (!wire.IsDone())
+        throw Standard_Failure("Could not build endpoint closure wire");
+      BRepBuilderAPI_MakeFace face(surface, wire.Wire(), true);
+      if (!face.IsDone())
+        throw Standard_Failure("Endpoint closure face builder failed");
+      BRepLib::SameParameter(face.Face(), 0.1 * tolerance, true);
+      if (!BRepCheck_Analyzer(face.Face()).IsValid())
+        throw Standard_Failure("Endpoint closure patch invalid");
+      target->Add(face.Face());
+    };
+    if (multiband)
+    {
+      struct Arc
+      {
+        gp_Pnt first, last;
+        TopoDS_Edge edge;
+      };
+      std::vector<Arc> arcs;
+      const auto bridge = [&](const gp_Pnt& p, const gp_Pnt& q, const InputPatch& fixed) {
+        if (p.Distance(q) < 0.25 * tolerance)
+          return TopoDS_Edge{};
+        for (const auto& arc : arcs)
+          if ((arc.first.Distance(p) < 0.25 * tolerance && arc.last.Distance(q) < 0.25 * tolerance)
+              || (arc.first.Distance(q) < 0.25 * tolerance && arc.last.Distance(p) < 0.25 * tolerance))
+            return arc.edge;
+        const double t = fixed.side ? angle : 0.0;
+        const double position = gp_Vec(base, pose(p, -t)).Dot(axis);
+        const auto a = profile(fixed.part, 0.0), b = profile(fixed.part, 1.0);
+        const auto& station = std::abs(position - a.z) < std::abs(position - b.z) ? a : b;
+        const auto center = pose(base.Translated(station.z * axis), t);
+        const gp_Vec normal(axis.Rotated(rotation, t));
+        const gp_Vec rp(center, p), rq(center, q);
+        const gp_Vec radial = rp - rp.Dot(normal) * normal;
+        const gp_Vec target = rq - rq.Dot(normal) * normal;
+        const double sweep = radial.AngleWithRef(target, normal);
+        const gp_Circ circle(gp_Ax2(center, gp_Dir(normal), gp_Dir(radial)), station.r);
+        const auto edge = BRepBuilderAPI_MakeEdge(circle, std::min(0.0, sweep),
+                                                   std::max(0.0, sweep)).Edge();
+        arcs.push_back({p,q,edge});
+        return edge;
+      };
+      for (const auto& fixed : gaps)
+      {
+        if (!fixed.owner || std::string_view(fixed.owner->kind) != "endpoint band")
+          continue;
+        const auto sf = BRep_Tool::Surface(fixed.owner->face);
+        for (const auto& moving : gaps)
+        {
+          if (!moving.owner || std::string_view(moving.owner->kind) != "lateral contact")
+            continue;
+          double begin, finish;
+          const auto curve = BRep_Tool::Curve(moving.edge, begin, finish);
+          double residual = 0.0;
+          for (const double fraction : {0.0, 0.5, 1.0})
+          {
+            GeomAPI_ProjectPointOnSurf projection(curve->Value(begin + fraction * (finish - begin)), sf, 1e-9);
+            if (!projection.IsDone() || projection.NbPoints() == 0)
+            {
+              residual = RealLast();
+              break;
+            }
+            residual = std::max(residual, projection.LowerDistance());
+          }
+          if (residual > 0.15 * tolerance)
+            continue;
+          // Matching endpoint circles must agree axially in the fixed frame.
+          const double t = fixed.owner->side ? angle : 0.0;
+          const auto z = [&](const gp_Pnt& p) { return gp_Vec(base, pose(p, -t)).Dot(axis); };
+          const auto e0 = moving.ends[0], e1 = moving.ends[1];
+          const bool forward = std::abs(z(fixed.ends[0]) - z(e0)) < std::abs(z(fixed.ends[0]) - z(e1));
+          const auto& p = forward ? e0 : e1;
+          const auto& q = forward ? e1 : e0;
+          if (std::abs(z(fixed.ends[0]) - z(p)) > 0.5 * tolerance
+              || std::abs(z(fixed.ends[1]) - z(q)) > 0.5 * tolerance)
+            continue;
+          std::vector<TopoDS_Edge> boundary{fixed.edge};
+          for (const auto& edge : {bridge(fixed.ends[0], p, *fixed.owner),
+                                   bridge(fixed.ends[1], q, *fixed.owner)})
+            if (!edge.IsNull()) boundary.push_back(edge);
+          boundary.push_back(moving.edge);
+          add(*fixed.owner, boundary);
+        }
+      }
+    }
+    else for (const auto& cap : gaps)
+    {
+      if (!cap.owner || std::string_view(cap.owner->kind) != "back cap")
+        continue;
+      for (const auto& rim : gaps)
+      {
+        if (!rim.owner || std::string_view(rim.owner->kind) != "endpoint band" || rim.owner->side != cap.owner->side)
+          continue;
+        const auto oldJoin = connection(cap, rim);
+        if (!oldJoin)
+          continue;
+        for (const auto& capCurve : gaps)
+        {
+          if (&capCurve == &cap || &capCurve == &rim || !connection(cap, capCurve))
+            continue;
+          for (const auto& rimCurve : gaps)
+          {
+            if (&rimCurve == &cap || &rimCurve == &rim || &rimCurve == &capCurve
+                || !connection(rim, rimCurve))
+              continue;
+            const auto newJoin = connection(capCurve, rimCurve);
+            if (!newJoin)
+              continue;
+            const double t = cap.owner->side ? angle : 0.0;
+            const auto center = pose(base, t);
+            const gp_Vec radial(center, *oldJoin);
+            const gp_Vec newRadial(center, *newJoin);
+            const gp_Vec normal(axis.Rotated(rotation, t));
+            const double sweep = radial.AngleWithRef(newRadial, normal);
+            const gp_Circ circle(gp_Ax2(center, gp_Dir(normal), gp_Dir(radial)), backFaceRadius);
+            const auto seam = BRepBuilderAPI_MakeEdge(circle, std::min(0.0, sweep),
+                                                       std::max(0.0, sweep)).Edge();
+            add(*cap.owner, {cap.edge, seam, capCurve.edge});
+            add(*rim.owner, {rim.edge, seam, rimCurve.edge});
+          }
+        }
+      }
+    }
+    completed.Perform();
+    BRepBuilderAPI_Sewing capClosure(0.8 * tolerance);
+    if (multiband)
+    {
+      target = &capClosure;
+      for (TopExp_Explorer ex(completed.SewedShape(), TopAbs_FACE); ex.More(); ex.Next())
+        capClosure.Add(ex.Current());
+      auto edges = occ::handle<NCollection_HSequence<TopoDS_Shape>>(
+        new NCollection_HSequence<TopoDS_Shape>);
+      for (int i = 1; i <= completed.NbFreeEdges(); ++i)
+        edges->Append(completed.FreeEdge(i));
+      const auto wires = ShapeAnalysis_FreeBounds::ConnectEdgesToWires(edges, 0.5 * tolerance, false);
+      for (const auto& wire : *wires)
+      {
+        std::vector<TopoDS_Edge> loop;
+        for (BRepTools_WireExplorer ex(TopoDS::Wire(wire)); ex.More(); ex.Next())
+          loop.push_back(ex.Current());
+        const InputPatch* owner = nullptr;
+        double best = RealLast();
+        for (const auto& fixed : inputPatches)
+        {
+          if (std::string_view(fixed.kind) != "back cap")
+            continue;
+          const auto plane = occ::handle<Geom_Plane>::DownCast(BRep_Tool::Surface(fixed.face));
+          if (plane.IsNull())
+            continue;
+          double error = 0.0;
+          for (const auto& edge : loop)
+          {
+            double firstParameter, lastParameter;
+            const auto curve = BRep_Tool::Curve(edge, firstParameter, lastParameter);
+            for (int i = 0; i <= 8; ++i)
+              error = std::max(error, plane->Pln().Distance(
+                curve->Value(firstParameter + (lastParameter - firstParameter) * i / 8.0)));
+          }
+          if (error < best)
+          {
+            best = error;
+            owner = &fixed;
+          }
+        }
+        if (owner && best <= 0.3 * tolerance)
+          add(*owner, loop);
+      }
+      capClosure.Perform();
+    }
+    const auto& finalSewing = multiband ? capClosure : completed;
+    if (finalSewing.NbFreeEdges() != 0 || finalSewing.NbMultipleEdges() != 0)
+      throw Standard_Failure("Endpoint closure did not close the envelope");
+    TopoDS_Solid result;
+    for (TopExp_Explorer ex(finalSewing.SewedShape(), TopAbs_SHELL); ex.More(); ex.Next())
+    {
+      auto solid = BRepBuilderAPI_MakeSolid(TopoDS::Shell(ex.Current())).Solid();
+      const bool oriented = BRepLib::OrientClosedSolid(solid);
+      const bool valid = BRepCheck_Analyzer(solid).IsValid();
+      GProp_GProps props;
+      BRepGProp::VolumeProperties(solid, props);
+      if (!oriented || !valid)
+        throw Standard_Failure("Endpoint closure produced an invalid shell");
+      if (std::abs(props.Mass()) <= std::pow(Precision::Confusion(), 3))
+      {
+        int faces = 0;
+        occ::handle<Geom_Plane> plane;
+        for (TopExp_Explorer face(solid, TopAbs_FACE); face.More(); face.Next())
+        {
+          ++faces;
+          const auto current = occ::handle<Geom_Plane>::DownCast(
+            BRep_Tool::Surface(TopoDS::Face(face.Current())));
+          if (current.IsNull() || (!plane.IsNull()
+              && (!current->Axis().Direction().IsParallel(plane->Axis().Direction(), Precision::Angular())
+                  || plane->Pln().Distance(current->Location()) > Precision::Confusion())))
+            throw Standard_Failure("Unexpected nonplanar zero-volume shell");
+          plane = current;
+        }
+        if (faces != 2)
+          throw Standard_Failure("Unexpected zero-volume shell");
+        continue;
+      }
+      if (!result.IsNull())
+        throw Standard_Failure("Endpoint closure produced multiple volumetric shells");
+      result = solid;
+    }
+    if (result.IsNull())
+      throw Standard_Failure("No valid closed main shell");
+    return result;
+  }
+
+  void addPatch(BRepBuilderAPI_Sewing& sewing, const TopoDS_Face& face,
+                const char* kind, int part, double first, double last, int side)
+  {
+    inputPatches.push_back({face, kind, part, first, last, side});
+    sewing.Add(face);
+  }
+
+  TopoDS_Solid sewFrontTrim(double tolerance)
+  {
+    if (capJoins.size() != 1 || capJoins.front().lag <= 0.0)
+      throw Standard_Failure("Expected one front cap/lateral join with positive lag");
+    const auto& join = capJoins.front();
+    const double station = 0.5 * (1.0 - std::cos(pi * join.lateralU));
+    const bool capAtLowU = profile(join.part, 0.0).z > profile(join.part, 1.0).z;
+    BRepBuilderAPI_Sewing trimmed(0.8 * tolerance);
+    std::vector<std::pair<TopoDS_Face, std::string>> trimInputs;
+    TopoDS_Face capStrip, lateralStrip;
+    double maxGap = 0.0;
+    occ::handle<Geom_Surface> capSupport, lateralSupport;
+    double lateralU = 0.0;
+    for (const auto& patch : inputPatches)
+    {
+      const bool cap = std::string_view(patch.kind) == "front chord";
+      const bool lateral = std::string_view(patch.kind) == "lateral contact"
+                           && patch.part == join.part && patch.side == join.branch
+                           && station > patch.first && station < patch.last;
+      if (!cap && !lateral)
+      {
+        trimmed.Add(patch.face);
+        trimInputs.emplace_back(patch.face, std::string(patch.kind) + " part="
+                                + std::to_string(patch.part) + " side=" + std::to_string(patch.side)
+                                + " range=[" + std::to_string(patch.first) + ","
+                                + std::to_string(patch.last) + "]");
+        continue;
+      }
+      const auto support = BRep_Tool::Surface(patch.face);
+      const auto makePart = [&](double u0, double u1, double t0, double t1) {
+        BRepBuilderAPI_MakeFace face(support, u0, u1, t0, t1, Precision::Confusion());
+        if (!face.IsDone())
+          throw Standard_Failure("Could not build a bounded trim face");
+        trimmed.Add(face.Face());
+        trimInputs.emplace_back(face.Face(), cap ? "trimmed front chord" : "trimmed lateral");
+        return face.Face();
+      };
+      const auto addTransition = [&](const std::vector<gp_Pnt2d>& boundary, double outerU,
+                                     const char* label, double splitTime = -1.0) {
+        BRepBuilderAPI_MakeWire wire;
+        const auto addCurve = [&](int a, int b) {
+          const auto points = occ::handle<NCollection_HArray1<gp_Pnt2d>>(
+            new NCollection_HArray1<gp_Pnt2d>(1, b - a + 1));
+          for (int i = a; i <= b; ++i)
+            points->SetValue(i - a + 1, boundary[i]);
+          Geom2dAPI_Interpolate fit(points, false, 1e-10);
+          fit.Perform();
+          wire.Add(BRepBuilderAPI_MakeEdge(fit.Curve(), support).Edge());
+        };
+        const auto addSegment = [&](const gp_Pnt2d& a, const gp_Pnt2d& b) {
+          wire.Add(BRepBuilderAPI_MakeEdge(GC_MakeSegment2d(a, b).Value(), support).Edge());
+        };
+        if (splitTime > 0.0)
+        {
+          const auto split = std::find_if(boundary.begin(), boundary.end(), [&](const gp_Pnt2d& p) {
+            return p.Y() == splitTime;
+          });
+          if (split == boundary.begin() || split == boundary.end())
+            throw Standard_Failure("Cannot locate cap-rim trim vertex");
+          const int index = int(split - boundary.begin());
+          addCurve(0, index);
+          addCurve(index, int(boundary.size()) - 1);
+        }
+        else
+          addCurve(0, int(boundary.size()) - 1);
+        const gp_Pnt2d last(outerU, boundary.back().Y()), first(outerU, boundary.front().Y());
+        addSegment(boundary.back(), last);
+        addSegment(last, first);
+        addSegment(first, boundary.front());
+        if (!wire.IsDone())
+          throw Standard_Failure("Transition trim wire did not close");
+        BRepBuilderAPI_MakeFace face(support, wire.Wire(), true);
+        if (!face.IsDone() || !BRepLib::BuildCurves3d(face.Face(), 1e-6)
+            || !BRepCheck_Analyzer(face.Face()).IsValid())
+          throw Standard_Failure("Could not build a wheel-pose transition trim face");
+        trimmed.Add(face.Face());
+        trimInputs.emplace_back(face.Face(), label);
+      };
+      if (cap)
+      {
+        capSupport = support;
+        if (join.initialBoundary.size() != 35)
+          throw Standard_Failure("Initial wheel trim curve is incomplete");
+        addTransition(join.initialBoundary, 1.0, "initial-wheel front chord", join.rimLag);
+        capStrip = makePart(join.capU, 1.0, join.lag, angle);
+      }
+      else
+      {
+        lateralSupport = support;
+        lateralU = std::acos(1.0 - 2.0 * (station - patch.first) / (patch.last - patch.first)) / pi;
+        lateralStrip = makePart(capAtLowU ? lateralU : 0.0, capAtLowU ? 1.0 : lateralU,
+                                0.0, angle - join.lag);
+        if (join.finalBoundary.size() != 33)
+          throw Standard_Failure("Final wheel trim curve is incomplete");
+        auto boundary = join.finalBoundary;
+        for (auto& sample : boundary)
+        {
+          const double profileStation = 0.5 * (1.0 - std::cos(pi * sample.X()));
+          const double interval = (profileStation - patch.first) / (patch.last - patch.first);
+          if (interval < 0.0 || interval > 1.0)
+            throw Standard_Failure("Final wheel trim crosses a lateral patch boundary");
+          sample.SetX(std::acos(1.0 - 2.0 * interval) / pi);
+        }
+        addTransition(boundary, capAtLowU ? 1.0 : 0.0, "final-wheel lateral");
+      }
+    }
+    if (capStrip.IsNull() || lateralStrip.IsNull())
+      throw Standard_Failure("Missing a support face for the front cap trim");
+    for (int i = 0; i <= 128; ++i)
+    {
+      const double t = (angle - join.lag) * i / 128.0;
+      maxGap = std::max(maxGap, capSupport->Value(join.capU, join.lag + t)
+                                 .Distance(lateralSupport->Value(lateralU, t)));
+    }
+    trimmed.Perform();
+    const auto& capImage = trimmed.IsModified(capStrip) ? trimmed.Modified(capStrip) : capStrip;
+    const auto& lateralImage = trimmed.IsModified(lateralStrip)
+                              ? trimmed.Modified(lateralStrip) : lateralStrip;
+    int shared = 0;
+    for (TopExp_Explorer first(capImage, TopAbs_EDGE); first.More(); first.Next())
+      for (TopExp_Explorer last(lateralImage, TopAbs_EDGE); last.More(); last.Next())
+        if (first.Current().IsSame(last.Current()))
+          ++shared;
+    if (shared != 1 || maxGap > tolerance)
+      throw Standard_Failure("Front cap and lateral faces did not share the helical trim edge");
+    const auto& shell = trimmed.SewedShape();
+    std::array<std::vector<TopoDS_Edge>, 2> endpointLoops;
+    TopoDS_Edge oldStartCap, oldStartBand, newStartCap, newStartBand;
+    TopoDS_Face startCap, startBand;
+    TopoDS_Shape endCapResult, oldEndCap;
+    for (int i = 1; i <= trimmed.NbFreeEdges(); ++i)
+    {
+      const auto& free = trimmed.FreeEdge(i);
+      double from, to;
+      const auto curve = BRep_Tool::Curve(free, from, to);
+      if (!curve.IsNull())
+      {
+        double startPlane = 0.0, endPlane = 0.0;
+        for (int k = 0; k <= 64; ++k)
+        {
+          const auto point = curve->Value(from + (to - from) * k / 64.0);
+          startPlane = std::max(startPlane, std::abs(gp_Vec(base, point).Dot(axis) - width));
+          endPlane = std::max(endPlane, std::abs(gp_Vec(base, pose(point, -angle)).Dot(axis) - width));
+        }
+        if (startPlane < tolerance * 0.2)
+          endpointLoops[0].push_back(TopoDS::Edge(free));
+        else if (endPlane < tolerance * 0.2)
+          endpointLoops[1].push_back(TopoDS::Edge(free));
+      }
+      for (const auto& [face, label] : trimInputs)
+      {
+        const auto& image = trimmed.IsModified(face) ? trimmed.Modified(face) : face;
+        for (TopExp_Explorer faces(image, TopAbs_FACE); faces.More(); faces.Next())
+        {
+          const auto& support = TopoDS::Face(faces.Current());
+          for (TopExp_Explorer edges(support, TopAbs_EDGE); edges.More(); edges.Next())
+          {
+            if (!edges.Current().IsSame(free))
+              continue;
+            double u0, u1, v0, v1;
+            BRepTools::UVBounds(support, free, u0, u1, v0, v1);
+            if (label.rfind("front cap", 0) == 0 && label.find("side=0") != std::string::npos)
+            {
+              oldStartCap = TopoDS::Edge(free);
+              startCap = support;
+            }
+            if (label.rfind("endpoint band", 0) == 0 && label.find("side=0") != std::string::npos)
+            {
+              oldStartBand = TopoDS::Edge(free);
+              startBand = support;
+            }
+            if (label == "initial-wheel front chord")
+            {
+              if (v1 <= join.rimLag + Precision::PConfusion())
+                newStartCap = TopoDS::Edge(free);
+              else
+                newStartBand = TopoDS::Edge(free);
+            }
+          }
+        }
+      }
+    }
+    for (const int end : {0, 1})
+    {
+      const auto& loop = endpointLoops[end];
+      if (loop.size() != (end ? 2 : 3))
+        continue;
+      const auto cap = std::find_if(inputPatches.begin(), inputPatches.end(), [&](const auto& patch) {
+        return std::string_view(patch.kind) == "front cap" && patch.side == end;
+      });
+      if (cap == inputPatches.end())
+        continue;
+      const BRepAdaptor_Surface support(cap->face);
+      const gp_Pln plane = support.Plane();
+      // Intersect the loop with a transverse line midway between its furthest
+      // endpoints. Testing the point between the crossings reveals whether
+      // this loop needs a cap addition or a cap subtraction.
+      std::vector<gp_Pnt> corners;
+      for (const auto& edge : loop)
+      {
+        double first, last;
+        const auto curve = BRep_Tool::Curve(edge, first, last);
+        corners.push_back(curve->Value(first));
+        corners.push_back(curve->Value(last));
+      }
+      gp_Pnt a, b;
+      double diameter = 0.0;
+      for (const auto& first : corners)
+        for (const auto& last : corners)
+          if (first.SquareDistance(last) > diameter)
+          {
+            a = first;
+            b = last;
+            diameter = first.SquareDistance(last);
+          }
+      const gp_Vec across(a, b);
+      std::vector<gp_Pnt> crossings;
+      for (const auto& edge : loop)
+      {
+        double lo, hi;
+        const auto curve = BRep_Tool::Curve(edge, lo, hi);
+        const auto value = [&](double t) { return gp_Vec(a, curve->Value(t)).Dot(across) - diameter / 2; };
+        const bool sign = value(lo) < 0.0;
+        if (sign == (value(hi) < 0.0))
+          continue;
+        for (int k = 0; k < 40; ++k)
+        {
+          const double mid = (lo + hi) / 2.0;
+          if ((value(mid) < 0.0) == sign)
+            lo = mid;
+          else
+            hi = mid;
+        }
+        crossings.push_back(curve->Value((lo + hi) / 2.0));
+      }
+      if (crossings.size() == 2)
+      {
+        const gp_Pnt mid = crossings[0].Translated(0.5 * gp_Vec(crossings[0], crossings[1]));
+        BRepClass_FaceClassifier classify(cap->face, mid, 1e-7);
+        if (end && classify.State() == TopAbs_IN)
+        {
+          const auto planeSurface = occ::handle<Geom_Plane>(new Geom_Plane(plane));
+          BRepBuilderAPI_MakeWire wire;
+          for (const auto& edge : loop)
+          {
+            double first, last;
+            const auto curve = BRep_Tool::Curve(edge, first, last);
+            const auto projected = GeomProjLib::ProjectOnPlane(
+              curve, planeSurface, plane.Axis().Direction(), true);
+            if (projected.IsNull())
+              throw Standard_Failure("Final cap trim could not be projected");
+            wire.Add(BRepBuilderAPI_MakeEdge(projected, first, last).Edge());
+          }
+          if (!wire.IsDone())
+            throw Standard_Failure("Final cap trim wire did not close");
+          BRepBuilderAPI_MakeFace region(plane, wire.Wire(), true);
+          if (!region.IsDone() || !BRepCheck_Analyzer(region.Face()).IsValid())
+            throw Standard_Failure("Final cap trim region is invalid");
+          const auto& oldEnd = trimmed.IsModified(cap->face) ? trimmed.Modified(cap->face) : cap->face;
+          BRepAlgoAPI_Cut subtract(oldEnd, region.Face());
+          if (subtract.HasErrors() || subtract.Shape().IsNull())
+            throw Standard_Failure("Final cap trim subtraction failed");
+          oldEndCap = oldEnd;
+          endCapResult = subtract.Shape();
+        }
+      }
+    }
+    if (startCap.IsNull() || startBand.IsNull() || oldStartCap.IsNull() || oldStartBand.IsNull()
+        || newStartCap.IsNull() || newStartBand.IsNull() || oldEndCap.IsNull())
+      throw Standard_Failure("Could not identify both start rim trim loops");
+    const auto commonPoint = [](const TopoDS_Edge& a, const TopoDS_Edge& b) {
+      double a0, a1, b0, b1;
+      const auto ca = BRep_Tool::Curve(a, a0, a1), cb = BRep_Tool::Curve(b, b0, b1);
+      double distance = 1e100;
+      gp_Pnt result;
+      for (const double u : {a0, a1})
+        for (const double v : {b0, b1})
+          if (ca->Value(u).SquareDistance(cb->Value(v)) < distance)
+          {
+            result = ca->Value(u);
+            distance = result.SquareDistance(cb->Value(v));
+          }
+      if (distance > 1e-10)
+        throw Standard_Failure("Start trim curves do not meet at the rim");
+      return result;
+    };
+    const auto oldRim = commonPoint(oldStartCap, oldStartBand);
+    const auto newRim = commonPoint(newStartCap, newStartBand);
+    const auto center = base.Translated(width * axis);
+    const auto radial = [&](const gp_Pnt& point) {
+      const gp_Vec v(center, point);
+      return (v - axis * v.Dot(axis)).Normalized();
+    };
+    const auto from = radial(oldRim), to = radial(newRim);
+    const double rimAngle = from.AngleWithRef(to, axis);
+    const gp_Circ circle(gp_Ax2(center, gp_Dir(axis), gp_Dir(from)), frontFaceRadius);
+    const auto rim = BRepBuilderAPI_MakeEdge(circle, std::min(0.0, rimAngle),
+                                            std::max(0.0, rimAngle)).Edge();
+    const auto subtractStart = [&](const TopoDS_Face& face, const TopoDS_Edge& oldEdge,
+                                   const TopoDS_Edge& newEdge) {
+      const auto support = BRep_Tool::Surface(face);
+      BRepBuilderAPI_MakeWire wire;
+      for (const auto& edge : {oldEdge, newEdge, rim})
+      {
+        double first, last, fitTolerance = 1e-6;
+        const auto curve = BRep_Tool::Curve(edge, first, last);
+        auto projected = edge.IsSame(oldEdge)
+                         ? BRep_Tool::CurveOnSurface(edge, face, first, last)
+                         : GeomProjLib::Curve2d(curve, first, last, support, fitTolerance);
+        if (projected.IsNull())
+        {
+          constexpr int samples = 25;
+          const auto points = occ::handle<NCollection_HArray1<gp_Pnt2d>>(
+            new NCollection_HArray1<gp_Pnt2d>(1, samples));
+          const auto parameters = occ::handle<NCollection_HArray1<double>>(
+            new NCollection_HArray1<double>(1, samples));
+          double u0, u1, v0, v1;
+          BRepTools::UVBounds(face, u0, u1, v0, v1);
+          fitTolerance = 0.0;
+          for (int i = 1; i <= samples; ++i)
+          {
+            const double t = first + (last - first) * (i - 1.0) / (samples - 1.0);
+            GeomAPI_ProjectPointOnSurf project(curve->Value(t), support, u0 - 0.01, u1 + 0.01,
+                                               v0 - 0.01, v1 + 0.01, 1e-9);
+            if (!project.NbPoints())
+              throw Standard_Failure("Cannot project a rounded-rim trim sample");
+            double u, v;
+            project.LowerDistanceParameters(u, v);
+            points->SetValue(i, gp_Pnt2d(u, v));
+            parameters->SetValue(i, t);
+            fitTolerance = std::max(fitTolerance, project.LowerDistance());
+          }
+          Geom2dAPI_Interpolate interpolate(points, parameters, false, 1e-10);
+          interpolate.Perform();
+          projected = interpolate.Curve();
+        }
+        if (fitTolerance > 1e-5)
+        {
+          throw Standard_Failure("Start rim trim could not be projected");
+        }
+        const auto projectedEdge = BRepBuilderAPI_MakeEdge(projected, support, first, last).Edge();
+        BRep_Builder builder;
+        for (TopExp_Explorer vertices(projectedEdge, TopAbs_VERTEX); vertices.More(); vertices.Next())
+          builder.UpdateVertex(TopoDS::Vertex(vertices.Current()), tolerance * 0.1);
+        wire.Add(projectedEdge);
+        if (!wire.IsDone())
+          throw Standard_Failure("Projected start trim edge did not join");
+      }
+      if (!wire.IsDone())
+        throw Standard_Failure("Start cap or rounded-band trim loop did not close");
+      BRepBuilderAPI_MakeFace region(support, wire.Wire(), true);
+      if (!region.IsDone() || !BRepLib::BuildCurves3d(region.Face(), 1e-6))
+        throw Standard_Failure("Start cap or rounded-band cutter could not build 3D curves");
+      if (!BRepCheck_Analyzer(region.Face()).IsValid())
+        throw Standard_Failure("Start cap or rounded-band cutter is invalid");
+      BRepAlgoAPI_Cut cut(face, region.Face());
+      if (cut.HasErrors() || cut.Shape().IsNull())
+        throw Standard_Failure("Start cap or rounded-band subtraction failed");
+      return cut.Shape();
+    };
+    const auto capResult = subtractStart(startCap, oldStartCap, newStartCap);
+    const auto bandResult = subtractStart(startBand, oldStartBand, newStartBand);
+    BRepBuilderAPI_Sewing closed(0.8 * tolerance);
+    for (TopExp_Explorer faces(shell, TopAbs_FACE); faces.More(); faces.Next())
+      if (!faces.Current().IsSame(startCap) && !faces.Current().IsSame(startBand)
+          && !faces.Current().IsSame(oldEndCap))
+        closed.Add(faces.Current());
+    for (const auto& replacement : {capResult, bandResult, endCapResult})
+      for (TopExp_Explorer faces(replacement, TopAbs_FACE); faces.More(); faces.Next())
+        closed.Add(faces.Current());
+    closed.Perform();
+    const auto& result = closed.SewedShape();
+    if (!result.IsNull() && result.ShapeType() == TopAbs_SHELL && closed.NbFreeEdges() == 0
+        && closed.NbMultipleEdges() == 0)
+    {
+      auto solid = BRepBuilderAPI_MakeSolid(TopoDS::Shell(result)).Solid();
+      const bool valid = BRepLib::OrientClosedSolid(solid) && BRepCheck_Analyzer(solid).IsValid();
+      if (valid)
+        return solid;
+    }
+    throw Standard_Failure("Front cap trim did not close as a valid solid");
+  }
+
+  void addInterval(BRepBuilderAPI_Sewing& sewing,
+                   int                    part,
+                   double                 a,
+                   double                 b,
+                   int&                   count,
+                   double&                worst)
+  {
+    for (int branch : {-1, 1})
+    {
+      const auto pointAt = [&](double u) { return contact(part, a, b, branch, u); };
+      const auto uPoles  = hermite(1.0, profileIntervals, [&](double u) {
+        const double delta = 1e-4;
+        const double lo = std::max(0.0, u - delta), hi = std::min(1.0, u + delta);
+        return Sample{pointAt(u), gp_Vec(pointAt(lo), pointAt(hi)) / (hi - lo)};
+      });
+      const auto patch   = surface(1.0, profileIntervals, 3, angle, timeIntervals, 3, [&](int i) {
+        return hermite(angle, timeIntervals, [&](double t) { return moving(uPoles[i], t); });
+      });
+      BRepBuilderAPI_MakeFace face(patch, 1.0e-7);
+      if (!face.IsDone() || !BRepCheck_Analyzer(face.Face()).IsValid())
+        throw Standard_Failure("Could not build a valid wheel envelope patch");
+      addPatch(sewing, face.Face(), "lateral contact", part, a, b, branch);
+      ++count;
+      for (int i = 0; i < 3 * profileIntervals; ++i)
+      {
+        const double u = (i + 0.5) / (3.0 * profileIntervals);
+        for (int j = 0; j < timeIntervals; ++j)
+        {
+          const double t = angle * (j + 0.5) / timeIntervals;
+          worst          = std::max(worst, pose(pointAt(u), t).Distance(patch->Value(u, t)));
+        }
+      }
+    }
+  }
+
+
+  void addEndpointPatch(BRepBuilderAPI_Sewing& sewing, int part, double a, double b,
+                        bool last, bool hasContact)
+  {
+    PatchCollector collector(Precision::Confusion());
+    addEndpointBand(collector, part, a, b, last, hasContact);
+    for (int i = 1; i <= collector.Count(); ++i)
+      addPatch(sewing, TopoDS::Face(collector.Input(i)), "endpoint band", part, a, b, last);
+  }
+
+  TopoDS_Solid buildTrimmed(const TopoDS_Solid& body, double tolerance)
+  {
+    validateMeridian();
+    BRepBuilderAPI_Sewing sewing(0.8 * tolerance);
+    int count = 0;
+    double worst = 0.0;
+    for (int part = 0; part < static_cast<int>(bands.size()); ++part)
+    {
+      std::vector<double> boundaries{0.0};
+      for (int i = 1; i <= 128; ++i)
+      {
+        const double a = (i - 1) / 128.0, b = i / 128.0;
+        if ((discriminant(part, a) >= 0.0) != (discriminant(part, b) >= 0.0))
+          boundaries.push_back(root(part, a, b));
+      }
+      boundaries.push_back(1.0);
+      for (std::size_t i = 1; i < boundaries.size(); ++i)
+      {
+        const double a = boundaries[i - 1], b = boundaries[i], mid = 0.5 * (a + b);
+        if (discriminant(part, mid) > 0.0)
+        {
+          addInterval(sewing, part, a, b, count, worst);
+          addEndpointPatch(sewing, part, a, b, false, true);
+          addEndpointPatch(sewing, part, a, b, true, true);
+        }
+        else
+        {
+          addEndpointPatch(sewing, part, a, b, equation(profile(part, mid)).c > 0.0, false);
+        }
+      }
+    }
+    if (count == 0 || worst > tolerance)
+    {
+      throw Standard_ConstructionError("Screw envelope missed the sampled fit tolerance");
+    }
+
+    addCap(sewing, false);
+    addCap(sewing, true);
+    findBackTrimJoins(body);
+    auto frontTrimmed = sewFrontTrim(tolerance);
+    return checkBackTrim(frontTrimmed, tolerance, body);
+  }
+};

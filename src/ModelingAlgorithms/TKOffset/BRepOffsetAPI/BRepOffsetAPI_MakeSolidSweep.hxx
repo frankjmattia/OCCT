@@ -28,6 +28,9 @@ public:
   using CircularTranslation = BRepSolidSweep_Sweep::CircularTranslation;
   using HelicalTranslation  = BRepSolidSweep_Sweep::HelicalTranslation;
   using ScrewMotion         = BRepSolidSweep_Sweep::ScrewMotion;
+  using RigidPose           = BRepSolidSweep_Sweep::RigidPose;
+  using RigidMotion         = BRepSolidSweep_Sweep::RigidMotion;
+  using RevolvingMotion     = BRepSolidSweep_Sweep::RevolvingMotion;
   using Motion              = std::variant<gp_Vec,
                                            NCollection_Sequence<gp_Vec>,
                                            CircularTranslation,
@@ -36,7 +39,7 @@ public:
 
   //! Initializes the builder. Build() or Solid() computes the swept volume.
   Standard_EXPORT BRepOffsetAPI_MakeSolidSweep(const TopoDS_Solid& theSolid,
-                                               const Motion& theMotion);
+                                               const Motion&       theMotion);
 
   Standard_EXPORT void Build(
     const Message_ProgressRange& theRange = Message_ProgressRange()) override;
@@ -47,10 +50,15 @@ public:
   //! Convenience entry point for constructing and returning a swept solid.
   Standard_EXPORT static TopoDS_Solid Sweep(const TopoDS_Solid& theSolid, const Motion& theMotion);
 
+  Standard_EXPORT static TopoDS_Solid Sweep(const TopoDS_Solid&    theSolid,
+                                            const RevolvingMotion& theMotion);
+
+  Standard_EXPORT static TopoDS_Solid Sweep(const TopoDS_Solid& theSolid,
+                                            const RigidMotion&  theMotion);
+
 private:
   TopoDS_Solid mySolid;
-  Motion myMotion;
+  Motion       myMotion;
 };
 
 #endif
-

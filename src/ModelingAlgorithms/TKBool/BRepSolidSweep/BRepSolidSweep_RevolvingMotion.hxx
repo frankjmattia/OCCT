@@ -32,8 +32,8 @@ class RevolvingMotion
 public:
   RevolvingMotion(const gp_Ax1& theAxis,
                   const gp_Vec& theDrift,
-                  double theInitialRate,
-                  double theRateDenominatorSlope)
+                  double        theInitialRate,
+                  double        theRateDenominatorSlope)
       : myAxis(theAxis),
         myDrift(theDrift),
         myInitialRate(theInitialRate),
@@ -104,15 +104,14 @@ public:
   //! speed about its returned axis. No axis is returned for translation.
   std::optional<ReferenceScrew> ScrewAt(double theStation) const
   {
-    const auto aField = ReferenceVelocity(theStation);
+    const auto   aField = ReferenceVelocity(theStation);
     const double aSpeed = aField.Angular.Magnitude();
     if (aSpeed <= Precision::Angular())
       return std::nullopt;
 
     const gp_Dir aDirection(aField.Angular);
     const gp_Vec aUnit(aDirection);
-    const gp_Pnt aCenter = aField.AxisLocation.Translated(
-      aUnit.Crossed(aField.Linear) / aSpeed);
+    const gp_Pnt aCenter = aField.AxisLocation.Translated(aUnit.Crossed(aField.Linear) / aSpeed);
     return ReferenceScrew{gp_Ax1(aCenter, aDirection), aField.Linear.Dot(aUnit) / aSpeed};
   }
 

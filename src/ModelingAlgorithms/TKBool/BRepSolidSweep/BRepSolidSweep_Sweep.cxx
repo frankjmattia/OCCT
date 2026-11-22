@@ -126,8 +126,7 @@ TopoDS_Solid     SweepCylinderTransversely(const TopoDS_Solid& theCylinder,
                                            const gp_Vec&       theTranslation);
 } // namespace
 
-TopoDS_Solid BRepSolidSweep_Sweep::Sweep(const TopoDS_Solid& theSolid,
-                                           const gp_Vec&       theTranslation)
+TopoDS_Solid BRepSolidSweep_Sweep::Sweep(const TopoDS_Solid& theSolid, const gp_Vec& theTranslation)
 {
   if (theSolid.IsNull() || !IsFinite(theTranslation))
   {
@@ -467,7 +466,7 @@ TopoDS_Solid HelixSpan::build(double tolerance, bool theExactWalls)
 } // namespace
 
 TopoDS_Solid BRepSolidSweep_Sweep::Sweep(const TopoDS_Solid&       theSolid,
-                                           const HelicalTranslation& theMotion)
+                                         const HelicalTranslation& theMotion)
 {
   if (!std::isfinite(theMotion.Angle) || !std::isfinite(theMotion.AdvancePerTurn)
       || !std::isfinite(theMotion.SurfaceTolerance) || theMotion.SurfaceTolerance <= 0.0)
@@ -632,7 +631,7 @@ TopoDS_Solid BRepSolidSweep_Sweep::Sweep(const TopoDS_Solid&       theSolid,
 }
 
 TopoDS_Solid BRepSolidSweep_Sweep::Sweep(const TopoDS_Solid&                 theSolid,
-                                           const NCollection_Sequence<gp_Vec>& theOffsets)
+                                         const NCollection_Sequence<gp_Vec>& theOffsets)
 {
   if (theSolid.IsNull() || theOffsets.IsEmpty())
   {
@@ -758,7 +757,7 @@ TopoDS_Solid SweepCylinderTransversely(const TopoDS_Solid& theCylinder,
 } // namespace
 
 TopoDS_Solid BRepSolidSweep_Sweep::Sweep(const TopoDS_Solid&        theSolid,
-                                           const CircularTranslation& theMotion)
+                                         const CircularTranslation& theMotion)
 {
   const gp_Ax1& aPathAxis = theMotion.Axis;
   const double  anAngle   = theMotion.Angle;

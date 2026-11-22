@@ -119,7 +119,7 @@ public:
   //! the placement law. Raises Standard_ConstructionError on unsupported
   //! contact topology or if the result cannot be closed.
   Standard_EXPORT static TopoDS_Solid Sweep(const TopoDS_Solid& theSolid,
-                                             const RigidMotion& theMotion);
+                                            const RigidMotion&  theMotion);
 };
 
 #endif

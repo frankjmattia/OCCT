@@ -78,9 +78,9 @@ inline ScrewPlacementSpan ScrewBetweenPlacements(const gp_Trsf& theStart, const 
     throw Standard_ConstructionError("Screw placements must be rigid and orientation-preserving");
 
   const gp_Trsf aRelative = theEnd * theStart.Inverted();
-  const gp_Vec aTranslation(aRelative.TranslationPart());
-  gp_XYZ anAxis;
-  double anAngle;
+  const gp_Vec  aTranslation(aRelative.TranslationPart());
+  gp_XYZ        anAxis;
+  double        anAngle;
   if (!aRelative.GetRotation(anAxis, anAngle) || std::abs(anAngle) <= Precision::Angular())
     return {gp_Ax1(), 0.0, 0.0, aTranslation};
 
@@ -98,10 +98,9 @@ inline ScrewPlacementSpan ScrewBetweenPlacements(const gp_Trsf& theStart, const 
 
   const gp_Dir aDirection(anAxis);
   const gp_Vec aUnit(aDirection);
-  const double anAdvance = aTranslation.Dot(aUnit);
+  const double anAdvance   = aTranslation.Dot(aUnit);
   const gp_Vec aTransverse = aTranslation - anAdvance * aUnit;
-  const gp_Vec aCenter =
-    0.5 * (aTransverse + aUnit.Crossed(aTransverse) / std::tan(0.5 * anAngle));
+  const gp_Vec aCenter = 0.5 * (aTransverse + aUnit.Crossed(aTransverse) / std::tan(0.5 * anAngle));
   return {gp_Ax1(gp_Pnt(aCenter.XYZ()), aDirection), anAngle, anAdvance, aTranslation};
 }
 
@@ -142,11 +141,12 @@ inline double ContactClearanceAcceleration(const gp_Dir& theOutward,
 //! along the line from its closest point to the common center. A tangent
 //! to the bore leaves one connected span; a tangent to the outer edge
 //! has no positive-length span to sweep.
-inline std::vector<std::pair<double, double>>
-AnnularContactSpans(double theInnerRadius, double theOuterRadius, double theOffset)
+inline std::vector<std::pair<double, double>> AnnularContactSpans(double theInnerRadius,
+                                                                  double theOuterRadius,
+                                                                  double theOffset)
 {
-  if (!std::isfinite(theInnerRadius) || !std::isfinite(theOuterRadius)
-      || !std::isfinite(theOffset) || theInnerRadius < 0.0 || theOuterRadius <= theInnerRadius)
+  if (!std::isfinite(theInnerRadius) || !std::isfinite(theOuterRadius) || !std::isfinite(theOffset)
+      || theInnerRadius < 0.0 || theOuterRadius <= theInnerRadius)
     throw Standard_ConstructionError("Invalid annular contact geometry");
 
   const double aDistance = std::abs(theOffset);
@@ -630,16 +630,17 @@ inline occ::handle<Geom_BSplineSurface> FitScrewContactRibbon(
   }
 
   const double aPi = std::acos(-1.0);
-  const double aStepLimit = aRadius == 0.0 ? aPi / 4.0
-    : std::min(aPi / 4.0, std::sqrt(std::sqrt((384.0 * theTolerance) / aRadius)));
+  const double aStepLimit =
+    aRadius == 0.0 ? aPi / 4.0
+                   : std::min(aPi / 4.0, std::sqrt(std::sqrt((384.0 * theTolerance) / aRadius)));
   const double aRequired = std::ceil(theAngle / aStepLimit);
   if (!(aRequired <= 4096.0))
     throw Standard_ConstructionError("Screw contact ribbon exceeded fitting capacity");
-  const int aCount = std::max(1, int(aRequired));
-  const double aStep = theAngle / aCount;
+  const int    aCount = std::max(1, int(aRequired));
+  const double aStep  = theAngle / aCount;
 
   NCollection_Array1<double> aKnots(1, aCount + 1);
-  NCollection_Array1<int> aMults(1, aCount + 1);
+  NCollection_Array1<int>    aMults(1, aCount + 1);
   for (int j = 0; j <= aCount; ++j)
   {
     aKnots(j + 1) = j == aCount ? theAngle : j * aStep;
@@ -650,28 +651,34 @@ inline occ::handle<Geom_BSplineSurface> FitScrewContactRibbon(
   NCollection_Array2<double> aWeights(1, aGenerator->NbPoles(), 1, 3 * aCount + 1);
   for (int i = 1; i <= aGenerator->NbPoles(); ++i)
   {
-    const gp_Pnt aPole = aGenerator->Pole(i);
-    gp_Pnt aPrevious = aPole;
-    const auto aVelocity = [&](const gp_Pnt& thePoint) {
+    const gp_Pnt aPole     = aGenerator->Pole(i);
+    gp_Pnt       aPrevious = aPole;
+    const auto   aVelocity = [&](const gp_Pnt& thePoint) {
       return anOmega.Crossed(gp_Vec(theAxis.Location(), thePoint)) + theRise * anOmega;
     };
-    aPoles(i, 1) = aPole;
+    aPoles(i, 1)   = aPole;
     aWeights(i, 1) = aGenerator->Weight(i);
     for (int j = 1; j <= aCount; ++j)
     {
-      const double t = aKnots(j + 1);
+      const double t         = aKnots(j + 1);
       const gp_Pnt aPosition = aPole.Rotated(theAxis, t).Translated((theRise * t) * anOmega);
-      aPoles(i, 3 * j - 1) = aPrevious.Translated((aStep / 3.0) * aVelocity(aPrevious));
-      aPoles(i, 3 * j)     = aPosition.Translated((-aStep / 3.0) * aVelocity(aPosition));
-      aPoles(i, 3 * j + 1) = aPosition;
+      aPoles(i, 3 * j - 1)   = aPrevious.Translated((aStep / 3.0) * aVelocity(aPrevious));
+      aPoles(i, 3 * j)       = aPosition.Translated((-aStep / 3.0) * aVelocity(aPosition));
+      aPoles(i, 3 * j + 1)   = aPosition;
       for (int k = 3 * j - 1; k <= 3 * j + 1; ++k)
         aWeights(i, k) = aGenerator->Weight(i);
       aPrevious = aPosition;
     }
   }
 
-  return new Geom_BSplineSurface(aPoles, aWeights, aGenerator->Knots(), aKnots,
-                                 aGenerator->Multiplicities(), aMults, aGenerator->Degree(), 3);
+  return new Geom_BSplineSurface(aPoles,
+                                 aWeights,
+                                 aGenerator->Knots(),
+                                 aKnots,
+                                 aGenerator->Multiplicities(),
+                                 aMults,
+                                 aGenerator->Degree(),
+                                 3);
 }
 
 //! Retain the part of a planar contact chord without a strict local fold.

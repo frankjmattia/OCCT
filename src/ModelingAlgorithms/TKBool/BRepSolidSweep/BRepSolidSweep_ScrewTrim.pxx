@@ -17,7 +17,9 @@
 struct PatchCollector : BRepBuilderAPI_Sewing
 {
   using BRepBuilderAPI_Sewing::BRepBuilderAPI_Sewing;
+
   int Count() const { return myOldShapes.Extent(); }
+
   const TopoDS_Shape& Input(int index) const { return myOldShapes.FindKey(index); }
 };
 
@@ -28,21 +30,22 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
 
   struct CapLateralJoin
   {
-    double capU, lag, lateralU;
-    int part, branch;
+    double                capU, lag, lateralU;
+    int                   part, branch;
     std::vector<gp_Pnt2d> initialBoundary;
     std::vector<gp_Pnt2d> finalBoundary;
-    double rimLag;
+    double                rimLag;
   };
+
   std::vector<CapLateralJoin> capJoins;
 
   void checkFinalTrim(CapLateralJoin& join)
   {
     const double z0 = profile(join.part, 0.0).z, z1 = profile(join.part, 1.0).z;
-    const bool capAtLowU = z0 > z1;
-    const double capU = capAtLowU ? 0.0 : 1.0;
-    const double capR = profile(join.part, capU).r;
-    const auto clearance = [&](double t, double u) {
+    const bool   capAtLowU = z0 > z1;
+    const double capU      = capAtLowU ? 0.0 : 1.0;
+    const double capR      = profile(join.part, capU).r;
+    const auto   clearance = [&](double t, double u) {
       const gp_Pnt point = contact(join.part, 0.0, 1.0, join.branch, u);
       const gp_Vec local(base, pose(point, t - angle));
       const double z = local.Dot(axis);
@@ -67,16 +70,15 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
     double residual = 0.0;
     for (int step = 1; step < 32; ++step)
     {
-      const double t = angle - join.lag * (1.0 - step / 32.0);
-      const double length = std::abs(capU - join.lateralU);
+      const double t         = angle - join.lag * (1.0 - step / 32.0);
+      const double length    = std::abs(capU - join.lateralU);
       const double direction = capAtLowU ? 1.0 : -1.0;
-      double distance = 0.0;
+      double       distance  = 0.0;
       for (int i = 1; i <= 256; ++i)
       {
         double lo = 2.0 * length * (i - 1) / 256.0;
         double hi = 2.0 * length * i / 256.0;
-        if (clearance(t, capU + direction * lo) <= 0.0
-            || clearance(t, capU + direction * hi) > 0.0)
+        if (clearance(t, capU + direction * lo) <= 0.0 || clearance(t, capU + direction * hi) > 0.0)
           continue;
         for (int k = 0; k < 38; ++k)
         {
@@ -92,21 +94,25 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
       if (distance == 0.0)
         continue;
       const double u = capU + direction * distance;
-      residual = std::max(residual, std::abs(clearance(t, u)));
+      residual       = std::max(residual, std::abs(clearance(t, u)));
       join.finalBoundary.emplace_back(u, t);
     }
     join.finalBoundary.emplace_back(capU, angle);
   }
 
-  void checkInitialTrim(const gp_Pnt& first, const gp_Vec& chord,
-                        double sharedU, double lag, double rimLag, int part,
+  void checkInitialTrim(const gp_Pnt&          first,
+                        const gp_Vec&          chord,
+                        double                 sharedU,
+                        double                 lag,
+                        double                 rimLag,
+                        int                    part,
                         std::vector<gp_Pnt2d>& boundary)
   {
     if (lag <= 0.0)
       return;
     const double firstZ = profile(part, 0.0).z, lastZ = profile(part, 1.0).z;
-    const bool reversed = firstZ > lastZ;
-    const auto clearance = [&](double t, double u) {
+    const bool   reversed  = firstZ > lastZ;
+    const auto   clearance = [&](double t, double u) {
       const gp_Vec local(base, pose(first.Translated(u * chord), t));
       const double z = local.Dot(axis);
       if (z <= std::min(firstZ, lastZ) || z > width)
@@ -124,25 +130,25 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
       return profile(part, reversed ? 1.0 - v : v).r
              - std::sqrt(std::max(0.0, local.SquareMagnitude() - z * z));
     };
-    double maxResidual = 0.0, endU = 0.0;
-    int matched = 0, planar = 0;
+    double     maxResidual = 0.0, endU = 0.0;
+    int        matched = 0, planar = 0;
     const auto acceleration = [&](const gp_Pnt& point) {
       return vertical.Crossed(vertical.Crossed(gp_Vec(rotation.Location(), point))).Dot(axis);
     };
-    const double start = acceleration(first);
-    const double end = acceleration(first.Translated(chord));
+    const double start    = acceleration(first);
+    const double end      = acceleration(first.Translated(chord));
     const double initialU = start / (start - end);
     if (initialU < 0.0 || initialU > 1.0)
       throw Standard_Failure("Initial trim does not approach an interior chord point");
     boundary.emplace_back(initialU, 0.0);
     for (int step = 1; step <= 33; ++step)
     {
-      const double t = step == 33 ? (rimLag + lag) / 2.0 : lag * step / 32.0;
-      double bestDistance = 2.0, bestU = 0.0;
-      const double z0 = gp_Vec(base, pose(first, t)).Dot(axis);
-      const double z1 = gp_Vec(base, pose(first.Translated(chord), t)).Dot(axis);
+      const double t            = step == 33 ? (rimLag + lag) / 2.0 : lag * step / 32.0;
+      double       bestDistance = 2.0, bestU = 0.0;
+      const double z0     = gp_Vec(base, pose(first, t)).Dot(axis);
+      const double z1     = gp_Vec(base, pose(first.Translated(chord), t)).Dot(axis);
       const double planeU = (width - z0) / (z1 - z0);
-      const auto cap = profile(part, reversed ? 0.0 : 1.0);
+      const auto   cap    = profile(part, reversed ? 0.0 : 1.0);
       if (planeU >= 0.0 && planeU <= 1.0)
       {
         const gp_Vec local(base, pose(first.Translated(planeU * chord), t));
@@ -183,7 +189,7 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
         if (std::abs(clearance(t, u)) < 1e-8 && std::abs(u - sharedU) < bestDistance)
         {
           bestDistance = std::abs(u - sharedU);
-          bestU = u;
+          bestU        = u;
         }
       }
       if (bestDistance > 1.0)
@@ -197,22 +203,25 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
     }
     boundary.emplace_back(sharedU, lag);
     const double zFirst = gp_Vec(base, pose(first, rimLag)).Dot(axis);
-    const double zLast = gp_Vec(base, pose(first.Translated(chord), rimLag)).Dot(axis);
+    const double zLast  = gp_Vec(base, pose(first.Translated(chord), rimLag)).Dot(axis);
     boundary.emplace_back((width - zFirst) / (zLast - zFirst), rimLag);
     std::sort(boundary.begin(), boundary.end(), [](const gp_Pnt2d& a, const gp_Pnt2d& b) {
       return a.Y() < b.Y();
     });
   }
 
-  void findCapLateralContact(const gp_Pnt& first, const gp_Vec& chord,
-                             double capU, double lag, const gp_Pnt& rimPoint)
+  void findCapLateralContact(const gp_Pnt& first,
+                             const gp_Vec& chord,
+                             double        capU,
+                             double        lag,
+                             const gp_Pnt& rimPoint)
   {
     // Match the two generating curves in one wheel frame. Screw symmetry
     // then carries the intersection point along a shared helix.
     for (int part = 0; part < int(bands.size()); ++part)
     {
-      if (std::min(std::abs(profile(part, 0.0).z - width),
-                   std::abs(profile(part, 1.0).z - width)) > Precision::Confusion())
+      if (std::min(std::abs(profile(part, 0.0).z - width), std::abs(profile(part, 1.0).z - width))
+          > Precision::Confusion())
         continue;
       for (const int branch : {-1, 1})
       {
@@ -220,18 +229,18 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
         double nearest = 1e100;
         for (int i = 0; i <= 256; ++i)
         {
-          const double station = i / 256.0;
+          const double station  = i / 256.0;
           const double distance = contact(part, 0.0, 1.0, branch, station).SquareDistance(rimPoint);
           if (distance < nearest)
           {
             nearest = distance;
-            v = station;
+            v       = station;
           }
         }
         v = std::clamp(v, 1e-5, 1.0 - 1e-5);
         for (int i = 0; i < 32; ++i)
         {
-          const auto source = moving(first.Translated(u * chord), q);
+          const auto   source  = moving(first.Translated(u * chord), q);
           const gp_Pnt partner = contact(part, 0.0, 1.0, branch, v);
           const gp_Vec error(source.point, partner);
           if (error.Magnitude() < 1e-9)
@@ -246,30 +255,31 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
           }
           const double step = 1e-6;
           const double left = std::max(0.0, v - step), right = std::min(1.0, v + step);
-          const gp_Vec dv = gp_Vec(contact(part, 0.0, 1.0, branch, right),
-                                  contact(part, 0.0, 1.0, branch, left)) / (right - left);
-          const gp_Vec du = chord.Rotated(rotation, q);
-          const auto& dq = source.derivative;
+          const gp_Vec dv =
+            gp_Vec(contact(part, 0.0, 1.0, branch, right), contact(part, 0.0, 1.0, branch, left))
+            / (right - left);
+          const gp_Vec du          = chord.Rotated(rotation, q);
+          const auto&  dq          = source.derivative;
           const double determinant = du.Dot(dq.Crossed(dv));
           if (std::abs(determinant) < 1e-15)
             break;
-          const double deltaU = error.Dot(dq.Crossed(dv)) / determinant;
-          const double deltaQ = du.Dot(error.Crossed(dv)) / determinant;
-          const double deltaV = du.Dot(dq.Crossed(error)) / determinant;
-          bool advanced = false;
+          const double deltaU   = error.Dot(dq.Crossed(dv)) / determinant;
+          const double deltaQ   = du.Dot(error.Crossed(dv)) / determinant;
+          const double deltaV   = du.Dot(dq.Crossed(error)) / determinant;
+          bool         advanced = false;
           for (double scale = 1.0; scale >= 1.0 / 1024.0; scale *= 0.5)
           {
             const double nextU = u + scale * deltaU, nextQ = q + scale * deltaQ;
             const double nextV = v + scale * deltaV;
-            if (nextU < 0.0 || nextU > 1.0 || nextV < 0.0 || nextV > 1.0
-                || std::abs(nextQ) >= angle || std::abs(nextQ) < 1e-4)
+            if (nextU < 0.0 || nextU > 1.0 || nextV < 0.0 || nextV > 1.0 || std::abs(nextQ) >= angle
+                || std::abs(nextQ) < 1e-4)
               continue;
             const auto p = pose(first.Translated(nextU * chord), nextQ);
             if (p.SquareDistance(contact(part, 0.0, 1.0, branch, nextV)) >= error.SquareMagnitude())
               continue;
-            u = nextU;
-            q = nextQ;
-            v = nextV;
+            u        = nextU;
+            q        = nextQ;
+            v        = nextV;
             advanced = true;
             break;
           }
@@ -283,7 +293,7 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
   void findCapContacts(const gp_Pnt& first, const gp_Pnt& last, const gp_Pnt& center, double rim)
   {
     const gp_Vec chord(first, last);
-    const auto planeIntersection = [&](double relative) {
+    const auto   planeIntersection = [&](double relative) {
       const double a = gp_Vec(center, pose(first, relative)).Dot(axis);
       const double b = gp_Vec(center, pose(last, relative)).Dot(axis);
       return a / (a - b);
@@ -295,7 +305,7 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
     constexpr int stations = 2048;
     for (int i = 2; i <= stations; ++i)
     {
-      double lo = angle * (i - 1) / stations, hi = angle * i / stations;
+      double       lo = angle * (i - 1) / stations, hi = angle * i / stations;
       const double previous = residual(lo), current = residual(hi);
       if (!std::isfinite(previous) || !std::isfinite(current)
           || (previous < 0.0) == (current < 0.0))
@@ -309,7 +319,7 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
           hi = mid;
       }
       const double relative = (lo + hi) / 2.0;
-      const double u = planeIntersection(relative);
+      const double u        = planeIntersection(relative);
       if (!(u >= 0.0 && u <= 1.0) || std::abs(residual(relative)) > 1e-8)
         continue;
       findCapLateralContact(first, chord, u, relative, pose(first.Translated(u * chord), relative));
@@ -318,17 +328,17 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
 
   void addCap(BRepBuilderAPI_Sewing& sewing, bool front)
   {
-    const double z = front ? width : 0.0;
-    const double radius = front ? frontFaceRadius : backFaceRadius;
-    const ContactEquation e = equation({z, radius, 1.0, 0.0});
-    const double amplitude = std::hypot(e.a, e.b);
-    const bool mixed = std::abs(e.c) < amplitude;
-    const double phase = std::atan2(e.b, e.a);
-    const double half = mixed ? std::acos(-e.c / amplitude) : pi;
-    const double first = phase - half;
-    const double last = phase + half;
-    const gp_Pnt center = base.Translated(z * axis);
-    const auto point = [&](double phi) {
+    const double          z         = front ? width : 0.0;
+    const double          radius    = front ? frontFaceRadius : backFaceRadius;
+    const ContactEquation e         = equation({z, radius, 1.0, 0.0});
+    const double          amplitude = std::hypot(e.a, e.b);
+    const bool            mixed     = std::abs(e.c) < amplitude;
+    const double          phase     = std::atan2(e.b, e.a);
+    const double          half      = mixed ? std::acos(-e.c / amplitude) : pi;
+    const double          first     = phase - half;
+    const double          last      = phase + half;
+    const gp_Pnt          center    = base.Translated(z * axis);
+    const auto            point     = [&](double phi) {
       return center.Translated(radius * (std::cos(phi) * radialX + std::sin(phi) * radialY));
     };
     for (const bool atEnd : {false, true})
@@ -336,16 +346,18 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
       const bool positive = atEnd == front;
       if (!mixed && positive != (e.c > 0.0))
         continue;
-      const double t = atEnd ? angle : 0.0;
-      const gp_Circ circle(gp_Ax2(pose(center,t), gp_Dir(axis.Rotated(rotation,t)),
-                                 gp_Dir(radialX.Rotated(rotation,t))), radius);
+      const double            t = atEnd ? angle : 0.0;
+      const gp_Circ           circle(gp_Ax2(pose(center, t),
+                                            gp_Dir(axis.Rotated(rotation, t)),
+                                            gp_Dir(radialX.Rotated(rotation, t))),
+                                     radius);
       BRepBuilderAPI_MakeWire wire;
       if (mixed)
       {
-        const double a = positive ? first : last;
-        const double b = positive ? last : first + 2.0*pi;
+        const double            a = positive ? first : last;
+        const double            b = positive ? last : first + 2.0 * pi;
         BRepBuilderAPI_MakeEdge arc(circle, a, b);
-        BRepBuilderAPI_MakeEdge chord(pose(point(b),t), pose(point(a),t));
+        BRepBuilderAPI_MakeEdge chord(pose(point(b), t), pose(point(a), t));
         wire.Add(arc.Edge());
         wire.Add(chord.Edge());
       }
@@ -354,15 +366,20 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
         BRepBuilderAPI_MakeEdge rim(circle);
         wire.Add(rim.Edge());
       }
-      addPatch(sewing, BRepBuilderAPI_MakeFace(wire.Wire()).Face(),
-               front ? "front cap" : "back cap", -1, t, t, atEnd);
+      addPatch(sewing,
+               BRepBuilderAPI_MakeFace(wire.Wire()).Face(),
+               front ? "front cap" : "back cap",
+               -1,
+               t,
+               t,
+               atEnd);
     }
     if (mixed)
     {
       const gp_Pnt ends[] = {point(first), point(last)};
       if (front)
         findCapContacts(ends[0], ends[1], center, radius);
-      const auto patch = surface(1.0, 1, 1, angle, timeIntervals, 3, [&](int i) {
+      const auto              patch = surface(1.0, 1, 1, angle, timeIntervals, 3, [&](int i) {
         return hermite(angle, timeIntervals, [&](double t) { return moving(ends[i], t); });
       });
       BRepBuilderAPI_MakeFace face(patch, 0.0, 1.0, 0.0, angle, 1.0e-7);
@@ -376,19 +393,22 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
   {
     TopoDS_Face face;
     const char* kind;
-    int part;
-    double first;
-    double last;
-    int side;
+    int         part;
+    double      first;
+    double      last;
+    int         side;
   };
+
   std::vector<InputPatch> inputPatches;
+
   struct LateralJoin
   {
     const InputPatch* first;
     const InputPatch* second;
-    double u, v, lag;
-    bool keepLowFirst, keepLowSecond;
+    double            u, v, lag;
+    bool              keepLowFirst, keepLowSecond;
   };
+
   std::vector<LateralJoin> backJoins;
 
   void findBackTrimJoins(const TopoDS_Solid& body)
@@ -396,19 +416,19 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
     // Removing the axial advance and rotation maps each screw orbit to one
     // point in a plane normal to the screw axis.
     const BRepSolidSweep::ScrewOrbitCoordinates coordinates(rotation, rise);
-    BRepSolidSweep::OrbitIntersector occupancy(body, 1.0e-7);
-    const auto point = [&](const InputPatch& p, double u) {
+    BRepSolidSweep::OrbitIntersector            occupancy(body, 1.0e-7);
+    const auto                                  point = [&](const InputPatch& p, double u) {
       return p.part >= 0 ? contact(p.part, p.first, p.last, p.side, u)
                          : BRep_Tool::Surface(p.face)->Value(u, 0.0);
     };
     const auto exposed = [&](const InputPatch& patch, double u, double t) {
       const auto contactPoint = point(patch, u);
-      gp_Vec normal = -axis;
+      gp_Vec     normal       = -axis;
       if (patch.part >= 0)
       {
-        const double station = patch.first + (patch.last - patch.first)
-                               * (0.5 * (1.0 - std::cos(pi * u)));
-        const auto meridian = profile(patch.part, station);
+        const double station =
+          patch.first + (patch.last - patch.first) * (0.5 * (1.0 - std::cos(pi * u)));
+        const auto   meridian = profile(patch.part, station);
         const gp_Vec radial(base.Translated(meridian.z * axis), contactPoint);
         normal = meridian.nz * axis + meridian.nr * radial.Normalized();
       }
@@ -416,11 +436,13 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
       return occupancy.Occupied(outside, rotation, rise, t - angle, t).empty();
     };
     constexpr int steps = 128;
+
     struct Trace
     {
-      const InputPatch* patch;
+      const InputPatch*               patch;
       std::array<gp_Pnt2d, steps + 1> samples;
     };
+
     std::vector<Trace> traces;
     for (const auto& patch : inputPatches)
     {
@@ -443,15 +465,15 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
           for (int l = i == j ? k + 2 : 0; l < steps; ++l)
           {
             const gp_Vec2d db(b.samples[l], b.samples[l + 1]);
-            const double determinant = da.Crossed(db);
+            const double   determinant = da.Crossed(db);
             if (std::abs(determinant) < 1e-15)
               continue;
             const gp_Vec2d delta(a.samples[k], b.samples[l]);
-            const double ka = delta.Crossed(db) / determinant;
-            const double kb = delta.Crossed(da) / determinant;
+            const double   ka = delta.Crossed(db) / determinant;
+            const double   kb = delta.Crossed(da) / determinant;
             if (ka < 0.0 || ka > 1.0 || kb < 0.0 || kb > 1.0)
               continue;
-            double u = (k + ka) / steps, v = (l + kb) / steps;
+            double     u = (k + ka) / steps, v = (l + kb) / steps;
             const auto fa = [&](double t) { return coordinates.Key(point(*a.patch, t)); };
             const auto fb = [&](double t) { return coordinates.Key(point(*b.patch, t)); };
             for (int it = 0; it < 12; ++it)
@@ -460,8 +482,8 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
               if (error.Magnitude() < 1e-11)
                 break;
               constexpr double h = 1e-6;
-              const gp_Vec2d du(fa(u - h), fa(u + h)), dv(fb(v - h), fb(v + h));
-              const double d = du.Crossed(dv);
+              const gp_Vec2d   du(fa(u - h), fa(u + h)), dv(fb(v - h), fb(v + h));
+              const double     d = du.Crossed(dv);
               if (std::abs(d) < 1e-20)
                 break;
               u += 2.0 * h * error.Crossed(dv) / d;
@@ -471,26 +493,25 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
             }
             if (!(u > 1e-5 && u < 1.0 - 1e-5 && v > 1e-5 && v < 1.0 - 1e-5))
               continue;
-            const auto p = point(*a.patch, u), q = point(*b.patch, v);
+            const auto   p = point(*a.patch, u), q = point(*b.patch, v);
             const double lag = coordinates.Lag(p, q);
             if (std::abs(lag) <= 1e-5 || std::abs(lag) >= angle)
               continue;
             const double gap = pose(p, lag).Distance(q);
             if (gap > 1e-8)
               continue;
-            const double timeA = (angle + lag) / 2.0;
-            const double timeB = (angle - lag) / 2.0;
+            const double     timeA = (angle + lag) / 2.0;
+            const double     timeB = (angle - lag) / 2.0;
             constexpr double flank = 0.01;
-            const auto side = [&](const InputPatch& patch, double x, double t) {
-              return std::array{
-                exposed(patch, std::max(0.0, x - flank), t) ? 'E' : 'B',
-                exposed(patch, std::min(1.0, x + flank), t) ? 'E' : 'B'};
+            const auto       side  = [&](const InputPatch& patch, double x, double t) {
+              return std::array{exposed(patch, std::max(0.0, x - flank), t) ? 'E' : 'B',
+                                exposed(patch, std::min(1.0, x + flank), t) ? 'E' : 'B'};
             };
             const auto sidesA = side(*a.patch, u, timeA), sidesB = side(*b.patch, v, timeB);
-            if (a.patch->part >= 0 && b.patch->part >= 0
-                && sidesA[0] != sidesA[1] && sidesB[0] != sidesB[1])
-              backJoins.push_back({a.patch, b.patch, u, v, lag,
-                                   sidesA[0] == 'E', sidesB[0] == 'E'});
+            if (a.patch->part >= 0 && b.patch->part >= 0 && sidesA[0] != sidesA[1]
+                && sidesB[0] != sidesB[1])
+              backJoins.push_back(
+                {a.patch, b.patch, u, v, lag, sidesA[0] == 'E', sidesB[0] == 'E'});
           }
         }
       }
@@ -500,21 +521,26 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
   struct EndpointTrace
   {
     std::vector<gp_Pnt2d> points;
-    std::vector<int> seamVertices;
-    std::vector<int> supports;
-    double fixedTime = 0.0;
+    std::vector<int>      seamVertices;
+    std::vector<int>      supports;
+    double                fixedTime = 0.0;
   };
-  EndpointTrace traceEndpoint(const InputPatch& patch, double seamU, bool keepLow,
-                                 double first, double last, bool atStart)
+
+  EndpointTrace traceEndpoint(const InputPatch& patch,
+                              double            seamU,
+                              bool              keepLow,
+                              double            first,
+                              double            last,
+                              bool              atStart)
   {
-    int matched = 0;
-    double residual = 0.0;
-    double previous = seamU;
+    int           matched  = 0;
+    double        residual = 0.0;
+    double        previous = seamU;
     EndpointTrace trace;
     trace.points.emplace_back(seamU, atStart ? last : first);
-    auto& boundary = trace.points;
-    const double fixedTime = atStart ? 0.0 : angle;
-    trace.fixedTime = fixedTime;
+    auto&        boundary      = trace.points;
+    const double fixedTime     = atStart ? 0.0 : angle;
+    trace.fixedTime            = fixedTime;
     const auto inEndpointFrame = [&](double u, double t) {
       return pose(contact(patch.part, patch.first, patch.last, patch.side, u), t - fixedTime);
     };
@@ -538,7 +564,7 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
         return {gp_Pnt2d(first.z, first.r), gp_Pnt2d(last.z, last.r)};
       };
       gp_Pnt2d rim;
-      double gap = RealLast();
+      double   gap = RealLast();
       for (const auto& a : bounds(from))
         for (const auto& b : bounds(to))
           if (a.Distance(b) < gap)
@@ -550,10 +576,10 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
         throw Standard_Failure("Endpoint trim skipped a stationary face");
 
       const auto previous = boundary.back();
-      gp_Pnt2d uv((previous.X() + next.X()) * 0.5, (previous.Y() + next.Y()) * 0.5);
+      gp_Pnt2d   uv((previous.X() + next.X()) * 0.5, (previous.Y() + next.Y()) * 0.5);
       for (int iteration = 0; iteration < 20; ++iteration)
       {
-        const auto point = meridianCoordinates(uv);
+        const auto     point = meridianCoordinates(uv);
         const gp_Vec2d error(rim, point);
         if (error.Magnitude() < 1e-10)
         {
@@ -565,12 +591,12 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
           boundary.push_back(uv);
           return;
         }
-        const double h = 1e-6;
+        const double   h = 1e-6;
         const gp_Vec2d du(meridianCoordinates(gp_Pnt2d(uv.X() - h, uv.Y())),
                           meridianCoordinates(gp_Pnt2d(uv.X() + h, uv.Y())));
         const gp_Vec2d dt(meridianCoordinates(gp_Pnt2d(uv.X(), uv.Y() - h)),
                           meridianCoordinates(gp_Pnt2d(uv.X(), uv.Y() + h)));
-        const double determinant = du.Crossed(dt);
+        const double   determinant = du.Crossed(dt);
         if (std::abs(determinant) < 1e-20)
           break;
         uv.SetX(uv.X() - 2.0 * h * error.Crossed(dt) / determinant);
@@ -581,15 +607,14 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
     constexpr int timeSteps = 32, stations = 256;
     for (int step = 1; step <= timeSteps + 1; ++step)
     {
-      const double fraction = step < timeSteps ? step / double(timeSteps)
-                              : step == timeSteps ? 0.99 : 0.999;
-      const double t = atStart ? last - (last - first) * fraction
-                               : first + (last - first) * fraction;
-      const auto clearance = [&](double u) {
-        return endpointClearance(inEndpointFrame(u, t));
-      };
-      double next = previous, nearest = 2.0;
-      bool left = clearance(0.0).distance < 0.0;
+      const double fraction = step < timeSteps    ? step / double(timeSteps)
+                              : step == timeSteps ? 0.99
+                                                  : 0.999;
+      const double t =
+        atStart ? last - (last - first) * fraction : first + (last - first) * fraction;
+      const auto clearance = [&](double u) { return endpointClearance(inEndpointFrame(u, t)); };
+      double     next = previous, nearest = 2.0;
+      bool       left = clearance(0.0).distance < 0.0;
       for (int i = 1; i <= stations; ++i)
       {
         const bool right = clearance(i / double(stations)).distance < 0.0;
@@ -608,7 +633,7 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
           if (std::abs(u - previous) < nearest)
           {
             nearest = std::abs(u - previous);
-            next = u;
+            next    = u;
           }
         }
         left = right;
@@ -618,7 +643,7 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
         previous = next;
         ++matched;
         const auto contact = clearance(next);
-        residual = std::max(residual, std::abs(contact.distance));
+        residual           = std::max(residual, std::abs(contact.distance));
         if (contact.support != priorSupport)
         {
           splitAtSupport(priorSupport, contact.support, gp_Pnt2d(next, t));
@@ -643,13 +668,16 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
     return trace;
   }
 
-  occ::handle<Geom2d_BSplineCurve> fitEndpointTrim(
-    const occ::handle<Geom_Surface>& support, const std::vector<gp_Pnt2d>& boundary,
-    int first, int last, const occ::handle<Geom_Surface>& stationary, double tolerance)
+  occ::handle<Geom2d_BSplineCurve> fitEndpointTrim(const occ::handle<Geom_Surface>& support,
+                                                   const std::vector<gp_Pnt2d>&     boundary,
+                                                   int                              first,
+                                                   int                              last,
+                                                   const occ::handle<Geom_Surface>& stationary,
+                                                   double                           tolerance)
   {
     std::vector<gp_Pnt2d> samples(boundary.begin() + first, boundary.begin() + last + 1);
-    const auto plane = occ::handle<Geom_Plane>::DownCast(stationary);
-    const auto distance = [&](const gp_Pnt2d& uv) {
+    const auto            plane    = occ::handle<Geom_Plane>::DownCast(stationary);
+    const auto            distance = [&](const gp_Pnt2d& uv) {
       const gp_Pnt p = support->Value(uv.X(), uv.Y());
       if (!plane.IsNull())
         return gp_Vec(plane->Location(), p).Dot(gp_Vec(plane->Axis().Direction()));
@@ -670,10 +698,10 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
         const double error = distance(uv);
         if (std::abs(error) <= 0.01 * tolerance)
           return uv;
-        constexpr double h = 1e-5;
-        const double low = std::max(0.0, uv.X() - h), high = std::min(1.0, uv.X() + h);
-        const double derivative = (distance(gp_Pnt2d(high, uv.Y()))
-                                   - distance(gp_Pnt2d(low, uv.Y()))) / (high - low);
+        constexpr double h   = 1e-5;
+        const double     low = std::max(0.0, uv.X() - h), high = std::min(1.0, uv.X() + h);
+        const double     derivative =
+          (distance(gp_Pnt2d(high, uv.Y())) - distance(gp_Pnt2d(low, uv.Y()))) / (high - low);
         if (std::abs(derivative) <= Precision::Confusion())
           break;
         const double next = std::clamp(uv.X() - error / derivative, 0.0, 1.0);
@@ -691,11 +719,11 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
     }
     for (int attempt = 0; attempt < 8; ++attempt)
     {
-      const int count = int(samples.size());
-      const auto points = occ::handle<NCollection_HArray1<gp_Pnt2d>>(
-        new NCollection_HArray1<gp_Pnt2d>(1, count));
-      const auto parameters = occ::handle<NCollection_HArray1<double>>(
-        new NCollection_HArray1<double>(1, count));
+      const int  count = int(samples.size());
+      const auto points =
+        occ::handle<NCollection_HArray1<gp_Pnt2d>>(new NCollection_HArray1<gp_Pnt2d>(1, count));
+      const auto parameters =
+        occ::handle<NCollection_HArray1<double>>(new NCollection_HArray1<double>(1, count));
       for (int i = 1; i <= count; ++i)
       {
         points->SetValue(i, samples[i - 1]);
@@ -709,18 +737,18 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
         return fit.Curve();
 
       std::vector<gp_Pnt2d> refined;
-      double worst = 0.0, worstTime = 0.0;
+      double                worst = 0.0, worstTime = 0.0;
       for (std::size_t i = 1; i < samples.size(); ++i)
       {
         refined.push_back(samples[i - 1]);
         for (int j = 1; j <= 3; ++j)
         {
-          const double t = samples[i - 1].Y() + (samples[i].Y() - samples[i - 1].Y()) * j / 4.0;
-          const auto point = fit.Curve()->Value(t);
+          const double t     = samples[i - 1].Y() + (samples[i].Y() - samples[i - 1].Y()) * j / 4.0;
+          const auto   point = fit.Curve()->Value(t);
           const double residual = std::abs(distance(point));
           if (residual > worst)
           {
-            worst = residual;
+            worst     = residual;
             worstTime = t;
           }
           if (residual > 0.2 * tolerance)
@@ -737,19 +765,22 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
     throw Standard_Failure("Endpoint intersection missed the fit tolerance");
   }
 
-  TopoDS_Solid checkBackTrim(const TopoDS_Solid& frontTrimmed, double tolerance, const TopoDS_Solid& body)
+  TopoDS_Solid checkBackTrim(const TopoDS_Solid& frontTrimmed,
+                             double              tolerance,
+                             const TopoDS_Solid& body)
   {
     if (backJoins.size() != 1)
       throw Standard_Failure("Expected one exposed lateral join near the back cap");
-    const auto& join = backJoins.front();
-    const auto first = BRep_Tool::Surface(join.first->face);
-    const auto second = BRep_Tool::Surface(join.second->face);
-    const auto backChord = std::find_if(inputPatches.begin(), inputPatches.end(), [](const auto& p) {
-      return std::string_view(p.kind) == "back chord";
-    });
+    const auto& join   = backJoins.front();
+    const auto  first  = BRep_Tool::Surface(join.first->face);
+    const auto  second = BRep_Tool::Surface(join.second->face);
+    const auto  backChord =
+      std::find_if(inputPatches.begin(), inputPatches.end(), [](const auto& p) {
+        return std::string_view(p.kind) == "back chord";
+      });
     if (backChord == inputPatches.end())
       throw Standard_Failure("Missing back cap chord");
-    const auto buried = BRep_Tool::Surface(backChord->face);
+    const auto   buried = BRep_Tool::Surface(backChord->face);
     const double start = std::max(0.0, join.lag), end = std::min(angle, angle + join.lag);
     // Outside the common helical span, the competing pose is constrained by
     // the finite motion. Check its stationary wheel surface before fitting a
@@ -762,15 +793,16 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
     }
     else
     {
-      initial = traceEndpoint(*join.second, join.v, join.keepLowSecond, 0.0, start - join.lag, true);
+      initial =
+        traceEndpoint(*join.second, join.v, join.keepLowSecond, 0.0, start - join.lag, true);
       final = traceEndpoint(*join.first, join.u, join.keepLowFirst, end, angle, false);
     }
     BRepBuilderAPI_Sewing sewing(0.8 * tolerance);
-    TopoDS_Face firstStrip, secondStrip;
+    TopoDS_Face           firstStrip, secondStrip;
     for (TopExp_Explorer faces(frontTrimmed, TopAbs_FACE); faces.More(); faces.Next())
     {
-      const auto& face = TopoDS::Face(faces.Current());
-      const auto support = BRep_Tool::Surface(face);
+      const auto& face    = TopoDS::Face(faces.Current());
+      const auto  support = BRep_Tool::Surface(face);
       if (support == buried)
         continue;
       if (support != first && support != second)
@@ -778,12 +810,12 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
         sewing.Add(face);
         continue;
       }
-      const bool onFirst = support == first;
-      const double t0 = onFirst ? start : start - join.lag;
-      const double t1 = onFirst ? end : end - join.lag;
-      const double u = onFirst ? join.u : join.v;
-      const bool low = onFirst ? join.keepLowFirst : join.keepLowSecond;
-      const auto add = [&](double u0, double u1, double v0, double v1) {
+      const bool   onFirst = support == first;
+      const double t0      = onFirst ? start : start - join.lag;
+      const double t1      = onFirst ? end : end - join.lag;
+      const double u       = onFirst ? join.u : join.v;
+      const bool   low     = onFirst ? join.keepLowFirst : join.keepLowSecond;
+      const auto   add     = [&](double u0, double u1, double v0, double v1) {
         BRepBuilderAPI_MakeFace trimmed(support, u0, u1, v0, v1, Precision::Confusion());
         if (!trimmed.IsDone())
           throw Standard_Failure("Could not bound a back trim face");
@@ -791,11 +823,11 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
         return trimmed.Face();
       };
       const auto addEndpoint = [&](const EndpointTrace& trace) {
-        const auto& boundary = trace.points;
+        const auto&             boundary = trace.points;
         BRepBuilderAPI_MakeWire wire;
-        int segmentIndex = 0;
-        const auto addTrimEdge = [&](int first, int last) {
-          const int owner = trace.supports.at(segmentIndex++);
+        int                     segmentIndex = 0;
+        const auto              addTrimEdge  = [&](int first, int last) {
+          const int                 owner = trace.supports.at(segmentIndex++);
           occ::handle<Geom_Surface> trimSurface;
           // Curved segments with an interior trace already carry enough
           // constrained samples. A rim segment with only two endpoints
@@ -804,10 +836,10 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
           {
             for (const auto& fixed : inputPatches)
             {
-              const bool sameEndpoint = (fixed.side != 0) == (trace.fixedTime != 0.0);
+              const bool             sameEndpoint = (fixed.side != 0) == (trace.fixedTime != 0.0);
               const std::string_view kind(fixed.kind);
               const bool sameFace = owner >= 0 ? kind == "endpoint band" && fixed.part == owner
-                                              : kind == (owner == -1 ? "back cap" : "front cap");
+                                               : kind == (owner == -1 ? "back cap" : "front cap");
               if (sameEndpoint && sameFace)
               {
                 trimSurface = BRep_Tool::Surface(fixed.face);
@@ -815,52 +847,53 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
               }
             }
           }
-          const auto fitted = fitEndpointTrim(support, boundary, first, last, trimSurface, tolerance);
+          const auto fitted =
+            fitEndpointTrim(support, boundary, first, last, trimSurface, tolerance);
           const TopoDS_Edge edge = BRepBuilderAPI_MakeEdge(fitted, support).Edge();
           if (!BRepLib::BuildCurve3d(edge, 0.1 * tolerance))
             throw Standard_Failure("Could not build a 3D endpoint trim edge");
           bool attached = false;
           for (const auto& fixed : inputPatches)
           {
-            const std::string_view kind = fixed.kind;
-            const bool sameEndpoint = (fixed.side != 0) == (trace.fixedTime != 0.0);
-            const bool sameFace = owner >= 0
-              ? kind == "endpoint band" && fixed.part == owner
-              : kind == (owner == -1 ? "back cap" : "front cap");
+            const std::string_view kind         = fixed.kind;
+            const bool             sameEndpoint = (fixed.side != 0) == (trace.fixedTime != 0.0);
+            const bool sameFace = owner >= 0 ? kind == "endpoint band" && fixed.part == owner
+                                             : kind == (owner == -1 ? "back cap" : "front cap");
             if (!sameEndpoint || !sameFace)
               continue;
             const auto stationary = BRep_Tool::Surface(fixed.face);
-            double from, to;
-            const auto curve = BRep_Tool::Curve(edge, from, to);
-            double projectionTolerance = 0.0;
-            const auto plane = occ::handle<Geom_Plane>::DownCast(stationary);
+            double     from, to;
+            const auto curve               = BRep_Tool::Curve(edge, from, to);
+            double     projectionTolerance = 0.0;
+            const auto plane               = occ::handle<Geom_Plane>::DownCast(stationary);
             auto pcurve = plane.IsNull()
-              ? GeomProjLib::Curve2d(curve, from, to, stationary, projectionTolerance)
-              : GeomAPI::To2d(curve, plane->Pln());
+                            ? GeomProjLib::Curve2d(curve, from, to, stationary, projectionTolerance)
+                            : GeomAPI::To2d(curve, plane->Pln());
             const auto checkProjection = [&](const occ::handle<Geom2d_Curve>& projected) {
               if (projected.IsNull())
                 return RealLast();
               double residual = 0.0;
               for (int i = 0; i <= 64; ++i)
               {
-                const double t = from + (to - from) * i / 64.0;
+                const double   t = from + (to - from) * i / 64.0;
                 const gp_Pnt2d p = projected->Value(t);
-                residual = std::max(residual, stationary->Value(p.X(), p.Y()).Distance(curve->Value(t)));
+                residual =
+                  std::max(residual, stationary->Value(p.X(), p.Y()).Distance(curve->Value(t)));
               }
               return residual;
             };
             double residual = checkProjection(pcurve);
             if (residual > 0.5 * tolerance && plane.IsNull())
             {
-              constexpr int count = 17;
-              const auto points = occ::handle<NCollection_HArray1<gp_Pnt2d>>(
+              constexpr int count  = 17;
+              const auto    points = occ::handle<NCollection_HArray1<gp_Pnt2d>>(
                 new NCollection_HArray1<gp_Pnt2d>(1, count));
-              const auto parameters = occ::handle<NCollection_HArray1<double>>(
-                new NCollection_HArray1<double>(1, count));
+              const auto parameters =
+                occ::handle<NCollection_HArray1<double>>(new NCollection_HArray1<double>(1, count));
               bool complete = true;
               for (int i = 1; i <= count; ++i)
               {
-                const double t = from + (to - from) * (i - 1) / (count - 1.0);
+                const double               t = from + (to - from) * (i - 1) / (count - 1.0);
                 GeomAPI_ProjectPointOnSurf project(curve->Value(t), stationary, 1e-9);
                 if (!project.IsDone() || project.NbPoints() == 0)
                 {
@@ -887,7 +920,7 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
                   if (fittedResidual < residual)
                   {
                     residual = fittedResidual;
-                    pcurve = fit.Curve();
+                    pcurve   = fit.Curve();
                   }
                 }
               }
@@ -897,7 +930,10 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
               continue;
             }
             BRep_Builder builder;
-            builder.UpdateEdge(edge, pcurve, fixed.face, std::max(residual, Precision::Confusion()));
+            builder.UpdateEdge(edge,
+                               pcurve,
+                               fixed.face,
+                               std::max(residual, Precision::Confusion()));
             builder.Range(edge, fixed.face, from, to);
             attached = true;
           }
@@ -910,9 +946,9 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
           first = last;
         }
         addTrimEdge(first, int(boundary.size()) - 1);
-        const double outer = low ? 0.0 : 1.0;
+        const double   outer = low ? 0.0 : 1.0;
         const gp_Pnt2d last(outer, boundary.back().Y()), firstPoint(outer, boundary.front().Y());
-        const auto segment = [&](const gp_Pnt2d& a, const gp_Pnt2d& b) {
+        const auto     segment = [&](const gp_Pnt2d& a, const gp_Pnt2d& b) {
           if (a.Distance(b) > Precision::PConfusion())
             wire.Add(BRepBuilderAPI_MakeEdge(GC_MakeSegment2d(a, b).Value(), support).Edge());
         };
@@ -936,33 +972,37 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
     sewing.Perform();
     const auto& a = sewing.IsModified(firstStrip) ? sewing.Modified(firstStrip) : firstStrip;
     const auto& b = sewing.IsModified(secondStrip) ? sewing.Modified(secondStrip) : secondStrip;
-    int shared = 0;
+    int         shared = 0;
     for (TopExp_Explorer ea(a, TopAbs_EDGE); ea.More(); ea.Next())
       for (TopExp_Explorer eb(b, TopAbs_EDGE); eb.More(); eb.Next())
         shared += ea.Current().IsSame(eb.Current());
     if (shared != 1)
       throw Standard_Failure("The exposed lateral faces did not share their back trim edge");
-    TopoDS_Shape shell = sewing.SewedShape();
+    TopoDS_Shape             shell = sewing.SewedShape();
     std::vector<TopoDS_Edge> freeEdges;
-    const auto hasOnlyLateralSupports = [](const EndpointTrace& trace) {
-      return std::all_of(trace.supports.begin(), trace.supports.end(), [](int part) { return part >= 0; });
+    const auto               hasOnlyLateralSupports = [](const EndpointTrace& trace) {
+      return std::all_of(trace.supports.begin(), trace.supports.end(), [](int part) {
+        return part >= 0;
+      });
     };
     const bool multiband = hasOnlyLateralSupports(initial) && hasOnlyLateralSupports(final);
     if (multiband)
     {
       BRepSolidSweep::OrbitIntersector oracle(body, 1e-7);
-      const auto original = sewing.SewedShape();
-      BRepBuilderAPI_Sewing exterior(0.8 * tolerance);
+      const auto                       original = sewing.SewedShape();
+      BRepBuilderAPI_Sewing            exterior(0.8 * tolerance);
       for (TopExp_Explorer ex(original, TopAbs_FACE); ex.More(); ex.Next())
       {
         const auto face = TopoDS::Face(ex.Current());
-        double u0, u1, v0, v1;
+        double     u0, u1, v0, v1;
         BRepTools::UVBounds(face, u0, u1, v0, v1);
         const auto surf = BRep_Tool::Surface(face);
-        int coveredSamples = 0, samples = 0;
+        // A single exposed sample is enough to retain this face.
+        bool hasSample         = false;
+        bool allSamplesCovered = true;
         for (int k = 0; k < 49; ++k)
         {
-          const gp_Pnt2d uv(u0 + (u1-u0) * (k%7+.5)/7., v0 + (v1-v0) * (k/7+.5)/7.);
+          const gp_Pnt2d uv(u0 + (u1 - u0) * (k % 7 + .5) / 7., v0 + (v1 - v0) * (k / 7 + .5) / 7.);
           if (BRepClass_FaceClassifier(face, uv, 1e-8).State() != TopAbs_IN)
             continue;
           gp_Pnt p;
@@ -971,15 +1011,16 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
           gp_Vec n = du.Crossed(dv);
           if (n.Magnitude() <= 1e-10)
             continue;
-          ++samples;
+          hasSample = true;
           n.Normalize();
-          int sides = 0;
-          for (const auto sign : {-1.0, 1.0})
-            sides += !oracle.Occupied(p.Translated(sign * tolerance * n), rotation, rise,
-                                      -angle, 0).empty();
-          coveredSamples += sides == 2;
+          if (oracle.Occupied(p.Translated(-tolerance * n), rotation, rise, -angle, 0).empty()
+              || oracle.Occupied(p.Translated(tolerance * n), rotation, rise, -angle, 0).empty())
+          {
+            allSamplesCovered = false;
+            break;
+          }
         }
-        if (samples == 0 || coveredSamples != samples)
+        if (!hasSample || !allSamplesCovered)
           exterior.Add(face);
       }
       exterior.Perform();
@@ -992,12 +1033,14 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
       for (int i = 1; i <= sewing.NbFreeEdges(); ++i)
         freeEdges.push_back(sewing.FreeEdge(i));
     }
+
     struct Gap
     {
-      TopoDS_Edge edge;
-      const InputPatch* owner;
+      TopoDS_Edge           edge;
+      const InputPatch*     owner;
       std::array<gp_Pnt, 2> ends;
     };
+
     std::vector<Gap> gaps;
     for (const auto& edge : freeEdges)
     {
@@ -1008,12 +1051,14 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
         {
           if (!e.Current().IsSame(edge))
             continue;
-          const auto owner = std::find_if(inputPatches.begin(), inputPatches.end(), [&](const auto& p) {
-            return BRep_Tool::Surface(p.face) == sf;
-          });
+          const auto owner =
+            std::find_if(inputPatches.begin(), inputPatches.end(), [&](const auto& p) {
+              return BRep_Tool::Surface(p.face) == sf;
+            });
           TopoDS_Vertex v1, v2;
           TopExp::Vertices(edge, v1, v2);
-          gaps.push_back({edge, owner == inputPatches.end() ? nullptr : &*owner,
+          gaps.push_back({edge,
+                          owner == inputPatches.end() ? nullptr : &*owner,
                           {BRep_Tool::Pnt(v1), BRep_Tool::Pnt(v2)}});
         }
       }
@@ -1025,22 +1070,23 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
             return p;
       return std::nullopt;
     };
-    BRepBuilderAPI_Sewing completed(0.8 * tolerance);
+    BRepBuilderAPI_Sewing  completed(0.8 * tolerance);
     BRepBuilderAPI_Sewing* target = &completed;
     for (TopExp_Explorer f(shell, TopAbs_FACE); f.More(); f.Next())
       completed.Add(f.Current());
     const auto add = [&](const InputPatch& owner, const std::vector<TopoDS_Edge>& edges) {
       const auto& a = edges.front();
-      const auto surface = occ::handle<Geom_Surface>::DownCast(BRep_Tool::Surface(owner.face)->Copy());
+      const auto  surface =
+        occ::handle<Geom_Surface>::DownCast(BRep_Tool::Surface(owner.face)->Copy());
       double u0, u1, v0, v1;
       BRepTools::UVBounds(owner.face, u0, u1, v0, v1);
-      BRepBuilderAPI_MakeWire wire;
+      BRepBuilderAPI_MakeWire                  wire;
       std::vector<std::pair<gp_Pnt, gp_Pnt2d>> anchors;
       for (const auto& edge : edges)
       {
-        double from, to;
-        const auto curve = BRep_Tool::Curve(edge, from, to);
-        double uvFrom, uvTo;
+        double                    from, to;
+        const auto                curve = BRep_Tool::Curve(edge, from, to);
+        double                    uvFrom, uvTo;
         occ::handle<Geom2d_Curve> uv;
         if (edge.IsSame(a) || (multiband && edge.IsSame(edges.back())))
         {
@@ -1051,60 +1097,63 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
         {
           if (uv.IsNull())
           {
-          double fit = tolerance * 0.2;
-          const auto plane = occ::handle<Geom_Plane>::DownCast(surface);
-          uv = plane.IsNull() ? GeomProjLib::Curve2d(curve, from, to, surface, fit)
-                              : GeomAPI::To2d(curve, plane->Pln());
-          if (!plane.IsNull() ? uv.IsNull() || fit > tolerance * 0.5 : true)
-          {
-            const int count = multiband ? 65 : 17;
-            const auto points = occ::handle<NCollection_HArray1<gp_Pnt2d>>(
-              new NCollection_HArray1<gp_Pnt2d>(1, count));
-            const auto parameters = occ::handle<NCollection_HArray1<double>>(
-              new NCollection_HArray1<double>(1, count));
-            fit = 0;
-            for (int i = 1; i <= count; ++i)
+            double     fit   = tolerance * 0.2;
+            const auto plane = occ::handle<Geom_Plane>::DownCast(surface);
+            uv               = plane.IsNull() ? GeomProjLib::Curve2d(curve, from, to, surface, fit)
+                                              : GeomAPI::To2d(curve, plane->Pln());
+            if (!plane.IsNull() ? uv.IsNull() || fit > tolerance * 0.5 : true)
             {
-              const double t = from + (to - from) * (i - 1) / (count - 1.0);
-              GeomAPI_ProjectPointOnSurf projection(curve->Value(t), surface, 1e-9);
-              if (!projection.IsDone() || projection.NbPoints() == 0)
-                throw Standard_Failure("Could not project a closure sample");
-              double u, v;
-              projection.LowerDistanceParameters(u, v);
-              if (i > 1 && surface->IsUPeriodic())
+              const int  count  = multiband ? 65 : 17;
+              const auto points = occ::handle<NCollection_HArray1<gp_Pnt2d>>(
+                new NCollection_HArray1<gp_Pnt2d>(1, count));
+              const auto parameters =
+                occ::handle<NCollection_HArray1<double>>(new NCollection_HArray1<double>(1, count));
+              fit = 0;
+              for (int i = 1; i <= count; ++i)
               {
-                const auto period = surface->UPeriod();
-                u += period * std::round((points->Value(i - 1).X() - u) / period);
+                const double               t = from + (to - from) * (i - 1) / (count - 1.0);
+                GeomAPI_ProjectPointOnSurf projection(curve->Value(t), surface, 1e-9);
+                if (!projection.IsDone() || projection.NbPoints() == 0)
+                  throw Standard_Failure("Could not project a closure sample");
+                double u, v;
+                projection.LowerDistanceParameters(u, v);
+                if (i > 1 && surface->IsUPeriodic())
+                {
+                  const auto period = surface->UPeriod();
+                  u += period * std::round((points->Value(i - 1).X() - u) / period);
+                }
+                if (i > 1 && surface->IsVPeriodic())
+                {
+                  const double period = surface->VPeriod();
+                  v += period * std::round((points->Value(i - 1).Y() - v) / period);
+                }
+                if (i == 1 || i == count)
+                {
+                  for (const auto& anchor : anchors)
+                    if (anchor.first.Distance(curve->Value(t)) < 0.5 * tolerance)
+                    {
+                      const double period = surface->IsUPeriodic() ? surface->UPeriod() : 0.0;
+                      u = anchor.second.X()
+                          + (period == 0.0 ? 0.0
+                                           : period * std::round((u - anchor.second.X()) / period));
+                      const double vPeriod = surface->IsVPeriodic() ? surface->VPeriod() : 0.0;
+                      v = anchor.second.Y()
+                          + (vPeriod == 0.0
+                               ? 0.0
+                               : vPeriod * std::round((v - anchor.second.Y()) / vPeriod));
+                      break;
+                    }
+                }
+                points->SetValue(i, gp_Pnt2d(u, v));
+                parameters->SetValue(i, t);
+                fit = std::max(fit, projection.LowerDistance());
               }
-              if (i > 1 && surface->IsVPeriodic())
-              {
-                const double period = surface->VPeriod();
-                v += period * std::round((points->Value(i - 1).Y() - v) / period);
-              }
-              if (i == 1 || i == count)
-              {
-                for (const auto& anchor : anchors)
-                  if (anchor.first.Distance(curve->Value(t)) < 0.5 * tolerance)
-                  {
-                    const double period = surface->IsUPeriodic() ? surface->UPeriod() : 0.0;
-                    u = anchor.second.X() + (period == 0.0 ? 0.0 :
-                      period * std::round((u - anchor.second.X()) / period));
-                    const double vPeriod = surface->IsVPeriodic() ? surface->VPeriod() : 0.0;
-                    v = anchor.second.Y() + (vPeriod == 0.0 ? 0.0 :
-                      vPeriod * std::round((v - anchor.second.Y()) / vPeriod));
-                    break;
-                  }
-              }
-              points->SetValue(i, gp_Pnt2d(u, v));
-              parameters->SetValue(i, t);
-              fit = std::max(fit, projection.LowerDistance());
+              if (fit > tolerance * 0.5)
+                throw Standard_Failure("Could not project a closure edge to its endpoint face");
+              Geom2dAPI_Interpolate fitCurve(points, parameters, false, 1e-10);
+              fitCurve.Perform();
+              uv = fitCurve.Curve();
             }
-            if (fit > tolerance * 0.5)
-              throw Standard_Failure("Could not project a closure edge to its endpoint face");
-            Geom2dAPI_Interpolate fitCurve(points, parameters, false, 1e-10);
-            fitCurve.Perform();
-            uv = fitCurve.Curve();
-          }
           }
           BRep_Builder builder;
           if (surface->IsUPeriodic())
@@ -1122,14 +1171,19 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
           double residual = 0.0;
           for (int i = 0; i <= 64; ++i)
           {
-            const double t = from + (to - from) * i / 64.0;
-            const auto xy = uv->Value(t);
+            const double t  = from + (to - from) * i / 64.0;
+            const auto   xy = uv->Value(t);
             residual = std::max(residual, surface->Value(xy.X(), xy.Y()).Distance(curve->Value(t)));
           }
           if (residual > tolerance * 0.5)
-            throw Standard_Failure(("Closure pcurve residual " + std::to_string(residual)
-                                    + " on " + owner.kind + " anchors " + std::to_string(anchors.size())).c_str());
-          builder.UpdateEdge(edge, uv, surface, TopLoc_Location(), std::max(residual, Precision::Confusion()));
+            throw Standard_Failure(("Closure pcurve residual " + std::to_string(residual) + " on "
+                                    + owner.kind + " anchors " + std::to_string(anchors.size()))
+                                     .c_str());
+          builder.UpdateEdge(edge,
+                             uv,
+                             surface,
+                             TopLoc_Location(),
+                             std::max(residual, Precision::Confusion()));
           builder.Range(edge, surface, TopLoc_Location(), from, to);
           anchors.push_back({curve->Value(from), uv->Value(from)});
           anchors.push_back({curve->Value(to), uv->Value(to)});
@@ -1150,31 +1204,33 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
     {
       struct Arc
       {
-        gp_Pnt first, last;
+        gp_Pnt      first, last;
         TopoDS_Edge edge;
       };
+
       std::vector<Arc> arcs;
-      const auto bridge = [&](const gp_Pnt& p, const gp_Pnt& q, const InputPatch& fixed) {
+      const auto       bridge = [&](const gp_Pnt& p, const gp_Pnt& q, const InputPatch& fixed) {
         if (p.Distance(q) < 0.25 * tolerance)
           return TopoDS_Edge{};
         for (const auto& arc : arcs)
           if ((arc.first.Distance(p) < 0.25 * tolerance && arc.last.Distance(q) < 0.25 * tolerance)
-              || (arc.first.Distance(q) < 0.25 * tolerance && arc.last.Distance(p) < 0.25 * tolerance))
+              || (arc.first.Distance(q) < 0.25 * tolerance
+                  && arc.last.Distance(p) < 0.25 * tolerance))
             return arc.edge;
-        const double t = fixed.side ? angle : 0.0;
-        const double position = gp_Vec(base, pose(p, -t)).Dot(axis);
-        const auto a = profile(fixed.part, 0.0), b = profile(fixed.part, 1.0);
-        const auto& station = std::abs(position - a.z) < std::abs(position - b.z) ? a : b;
-        const auto center = pose(base.Translated(station.z * axis), t);
-        const gp_Vec normal(axis.Rotated(rotation, t));
-        const gp_Vec rp(center, p), rq(center, q);
-        const gp_Vec radial = rp - rp.Dot(normal) * normal;
-        const gp_Vec target = rq - rq.Dot(normal) * normal;
-        const double sweep = radial.AngleWithRef(target, normal);
+        const double  t        = fixed.side ? angle : 0.0;
+        const double  position = gp_Vec(base, pose(p, -t)).Dot(axis);
+        const auto    a = profile(fixed.part, 0.0), b = profile(fixed.part, 1.0);
+        const auto&   station = std::abs(position - a.z) < std::abs(position - b.z) ? a : b;
+        const auto    center  = pose(base.Translated(station.z * axis), t);
+        const gp_Vec  normal(axis.Rotated(rotation, t));
+        const gp_Vec  rp(center, p), rq(center, q);
+        const gp_Vec  radial = rp - rp.Dot(normal) * normal;
+        const gp_Vec  target = rq - rq.Dot(normal) * normal;
+        const double  sweep  = radial.AngleWithRef(target, normal);
         const gp_Circ circle(gp_Ax2(center, gp_Dir(normal), gp_Dir(radial)), station.r);
-        const auto edge = BRepBuilderAPI_MakeEdge(circle, std::min(0.0, sweep),
-                                                   std::max(0.0, sweep)).Edge();
-        arcs.push_back({p,q,edge});
+        const auto    edge =
+          BRepBuilderAPI_MakeEdge(circle, std::min(0.0, sweep), std::max(0.0, sweep)).Edge();
+        arcs.push_back({p, q, edge});
         return edge;
       };
       for (const auto& fixed : gaps)
@@ -1186,12 +1242,14 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
         {
           if (!moving.owner || std::string_view(moving.owner->kind) != "lateral contact")
             continue;
-          double begin, finish;
-          const auto curve = BRep_Tool::Curve(moving.edge, begin, finish);
-          double residual = 0.0;
+          double     begin, finish;
+          const auto curve    = BRep_Tool::Curve(moving.edge, begin, finish);
+          double     residual = 0.0;
           for (const double fraction : {0.0, 0.5, 1.0})
           {
-            GeomAPI_ProjectPointOnSurf projection(curve->Value(begin + fraction * (finish - begin)), sf, 1e-9);
+            GeomAPI_ProjectPointOnSurf projection(curve->Value(begin + fraction * (finish - begin)),
+                                                  sf,
+                                                  1e-9);
             if (!projection.IsDone() || projection.NbPoints() == 0)
             {
               residual = RealLast();
@@ -1202,62 +1260,66 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
           if (residual > 0.15 * tolerance)
             continue;
           // Matching endpoint circles must agree axially in the fixed frame.
-          const double t = fixed.owner->side ? angle : 0.0;
-          const auto z = [&](const gp_Pnt& p) { return gp_Vec(base, pose(p, -t)).Dot(axis); };
-          const auto e0 = moving.ends[0], e1 = moving.ends[1];
-          const bool forward = std::abs(z(fixed.ends[0]) - z(e0)) < std::abs(z(fixed.ends[0]) - z(e1));
+          const double t  = fixed.owner->side ? angle : 0.0;
+          const auto   z  = [&](const gp_Pnt& p) { return gp_Vec(base, pose(p, -t)).Dot(axis); };
+          const auto   e0 = moving.ends[0], e1 = moving.ends[1];
+          const bool   forward =
+            std::abs(z(fixed.ends[0]) - z(e0)) < std::abs(z(fixed.ends[0]) - z(e1));
           const auto& p = forward ? e0 : e1;
           const auto& q = forward ? e1 : e0;
           if (std::abs(z(fixed.ends[0]) - z(p)) > 0.5 * tolerance
               || std::abs(z(fixed.ends[1]) - z(q)) > 0.5 * tolerance)
             continue;
           std::vector<TopoDS_Edge> boundary{fixed.edge};
-          for (const auto& edge : {bridge(fixed.ends[0], p, *fixed.owner),
-                                   bridge(fixed.ends[1], q, *fixed.owner)})
-            if (!edge.IsNull()) boundary.push_back(edge);
+          for (const auto& edge :
+               {bridge(fixed.ends[0], p, *fixed.owner), bridge(fixed.ends[1], q, *fixed.owner)})
+            if (!edge.IsNull())
+              boundary.push_back(edge);
           boundary.push_back(moving.edge);
           add(*fixed.owner, boundary);
         }
       }
     }
-    else for (const auto& cap : gaps)
-    {
-      if (!cap.owner || std::string_view(cap.owner->kind) != "back cap")
-        continue;
-      for (const auto& rim : gaps)
+    else
+      for (const auto& cap : gaps)
       {
-        if (!rim.owner || std::string_view(rim.owner->kind) != "endpoint band" || rim.owner->side != cap.owner->side)
+        if (!cap.owner || std::string_view(cap.owner->kind) != "back cap")
           continue;
-        const auto oldJoin = connection(cap, rim);
-        if (!oldJoin)
-          continue;
-        for (const auto& capCurve : gaps)
+        for (const auto& rim : gaps)
         {
-          if (&capCurve == &cap || &capCurve == &rim || !connection(cap, capCurve))
+          if (!rim.owner || std::string_view(rim.owner->kind) != "endpoint band"
+              || rim.owner->side != cap.owner->side)
             continue;
-          for (const auto& rimCurve : gaps)
+          const auto oldJoin = connection(cap, rim);
+          if (!oldJoin)
+            continue;
+          for (const auto& capCurve : gaps)
           {
-            if (&rimCurve == &cap || &rimCurve == &rim || &rimCurve == &capCurve
-                || !connection(rim, rimCurve))
+            if (&capCurve == &cap || &capCurve == &rim || !connection(cap, capCurve))
               continue;
-            const auto newJoin = connection(capCurve, rimCurve);
-            if (!newJoin)
-              continue;
-            const double t = cap.owner->side ? angle : 0.0;
-            const auto center = pose(base, t);
-            const gp_Vec radial(center, *oldJoin);
-            const gp_Vec newRadial(center, *newJoin);
-            const gp_Vec normal(axis.Rotated(rotation, t));
-            const double sweep = radial.AngleWithRef(newRadial, normal);
-            const gp_Circ circle(gp_Ax2(center, gp_Dir(normal), gp_Dir(radial)), backFaceRadius);
-            const auto seam = BRepBuilderAPI_MakeEdge(circle, std::min(0.0, sweep),
-                                                       std::max(0.0, sweep)).Edge();
-            add(*cap.owner, {cap.edge, seam, capCurve.edge});
-            add(*rim.owner, {rim.edge, seam, rimCurve.edge});
+            for (const auto& rimCurve : gaps)
+            {
+              if (&rimCurve == &cap || &rimCurve == &rim || &rimCurve == &capCurve
+                  || !connection(rim, rimCurve))
+                continue;
+              const auto newJoin = connection(capCurve, rimCurve);
+              if (!newJoin)
+                continue;
+              const double  t      = cap.owner->side ? angle : 0.0;
+              const auto    center = pose(base, t);
+              const gp_Vec  radial(center, *oldJoin);
+              const gp_Vec  newRadial(center, *newJoin);
+              const gp_Vec  normal(axis.Rotated(rotation, t));
+              const double  sweep = radial.AngleWithRef(newRadial, normal);
+              const gp_Circ circle(gp_Ax2(center, gp_Dir(normal), gp_Dir(radial)), backFaceRadius);
+              const auto    seam =
+                BRepBuilderAPI_MakeEdge(circle, std::min(0.0, sweep), std::max(0.0, sweep)).Edge();
+              add(*cap.owner, {cap.edge, seam, capCurve.edge});
+              add(*rim.owner, {rim.edge, seam, rimCurve.edge});
+            }
           }
         }
       }
-    }
     completed.Perform();
     BRepBuilderAPI_Sewing capClosure(0.8 * tolerance);
     if (multiband)
@@ -1265,18 +1327,19 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
       target = &capClosure;
       for (TopExp_Explorer ex(completed.SewedShape(), TopAbs_FACE); ex.More(); ex.Next())
         capClosure.Add(ex.Current());
-      auto edges = occ::handle<NCollection_HSequence<TopoDS_Shape>>(
-        new NCollection_HSequence<TopoDS_Shape>);
+      auto edges =
+        occ::handle<NCollection_HSequence<TopoDS_Shape>>(new NCollection_HSequence<TopoDS_Shape>);
       for (int i = 1; i <= completed.NbFreeEdges(); ++i)
         edges->Append(completed.FreeEdge(i));
-      const auto wires = ShapeAnalysis_FreeBounds::ConnectEdgesToWires(edges, 0.5 * tolerance, false);
+      const auto wires =
+        ShapeAnalysis_FreeBounds::ConnectEdgesToWires(edges, 0.5 * tolerance, false);
       for (const auto& wire : *wires)
       {
         std::vector<TopoDS_Edge> loop;
         for (BRepTools_WireExplorer ex(TopoDS::Wire(wire)); ex.More(); ex.Next())
           loop.push_back(ex.Current());
         const InputPatch* owner = nullptr;
-        double best = RealLast();
+        double            best  = RealLast();
         for (const auto& fixed : inputPatches)
         {
           if (std::string_view(fixed.kind) != "back cap")
@@ -1287,15 +1350,16 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
           double error = 0.0;
           for (const auto& edge : loop)
           {
-            double firstParameter, lastParameter;
+            double     firstParameter, lastParameter;
             const auto curve = BRep_Tool::Curve(edge, firstParameter, lastParameter);
             for (int i = 0; i <= 8; ++i)
-              error = std::max(error, plane->Pln().Distance(
-                curve->Value(firstParameter + (lastParameter - firstParameter) * i / 8.0)));
+              error = std::max(error,
+                               plane->Pln().Distance(curve->Value(
+                                 firstParameter + (lastParameter - firstParameter) * i / 8.0)));
           }
           if (error < best)
           {
-            best = error;
+            best  = error;
             owner = &fixed;
           }
         }
@@ -1310,25 +1374,27 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
     TopoDS_Solid result;
     for (TopExp_Explorer ex(finalSewing.SewedShape(), TopAbs_SHELL); ex.More(); ex.Next())
     {
-      auto solid = BRepBuilderAPI_MakeSolid(TopoDS::Shell(ex.Current())).Solid();
-      const bool oriented = BRepLib::OrientClosedSolid(solid);
-      const bool valid = BRepCheck_Analyzer(solid).IsValid();
+      auto         solid    = BRepBuilderAPI_MakeSolid(TopoDS::Shell(ex.Current())).Solid();
+      const bool   oriented = BRepLib::OrientClosedSolid(solid);
+      const bool   valid    = BRepCheck_Analyzer(solid).IsValid();
       GProp_GProps props;
       BRepGProp::VolumeProperties(solid, props);
       if (!oriented || !valid)
         throw Standard_Failure("Endpoint closure produced an invalid shell");
       if (std::abs(props.Mass()) <= std::pow(Precision::Confusion(), 3))
       {
-        int faces = 0;
+        int                     faces = 0;
         occ::handle<Geom_Plane> plane;
         for (TopExp_Explorer face(solid, TopAbs_FACE); face.More(); face.Next())
         {
           ++faces;
-          const auto current = occ::handle<Geom_Plane>::DownCast(
-            BRep_Tool::Surface(TopoDS::Face(face.Current())));
-          if (current.IsNull() || (!plane.IsNull()
-              && (!current->Axis().Direction().IsParallel(plane->Axis().Direction(), Precision::Angular())
-                  || plane->Pln().Distance(current->Location()) > Precision::Confusion())))
+          const auto current =
+            occ::handle<Geom_Plane>::DownCast(BRep_Tool::Surface(TopoDS::Face(face.Current())));
+          if (current.IsNull()
+              || (!plane.IsNull()
+                  && (!current->Axis().Direction().IsParallel(plane->Axis().Direction(),
+                                                              Precision::Angular())
+                      || plane->Pln().Distance(current->Location()) > Precision::Confusion())))
             throw Standard_Failure("Unexpected nonplanar zero-volume shell");
           plane = current;
         }
@@ -1345,8 +1411,13 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
     return result;
   }
 
-  void addPatch(BRepBuilderAPI_Sewing& sewing, const TopoDS_Face& face,
-                const char* kind, int part, double first, double last, int side)
+  void addPatch(BRepBuilderAPI_Sewing& sewing,
+                const TopoDS_Face&     face,
+                const char*            kind,
+                int                    part,
+                double                 first,
+                double                 last,
+                int                    side)
   {
     inputPatches.push_back({face, kind, part, first, last, side});
     sewing.Add(face);
@@ -1356,31 +1427,32 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
   {
     if (capJoins.size() != 1 || capJoins.front().lag <= 0.0)
       throw Standard_Failure("Expected one front cap/lateral join with positive lag");
-    const auto& join = capJoins.front();
-    const double station = 0.5 * (1.0 - std::cos(pi * join.lateralU));
-    const bool capAtLowU = profile(join.part, 0.0).z > profile(join.part, 1.0).z;
+    const auto&           join      = capJoins.front();
+    const double          station   = 0.5 * (1.0 - std::cos(pi * join.lateralU));
+    const bool            capAtLowU = profile(join.part, 0.0).z > profile(join.part, 1.0).z;
     BRepBuilderAPI_Sewing trimmed(0.8 * tolerance);
     std::vector<std::pair<TopoDS_Face, std::string>> trimInputs;
-    TopoDS_Face capStrip, lateralStrip;
-    double maxGap = 0.0;
-    occ::handle<Geom_Surface> capSupport, lateralSupport;
-    double lateralU = 0.0;
+    TopoDS_Face                                      capStrip, lateralStrip;
+    double                                           maxGap = 0.0;
+    occ::handle<Geom_Surface>                        capSupport, lateralSupport;
+    double                                           lateralU = 0.0;
     for (const auto& patch : inputPatches)
     {
-      const bool cap = std::string_view(patch.kind) == "front chord";
+      const bool cap     = std::string_view(patch.kind) == "front chord";
       const bool lateral = std::string_view(patch.kind) == "lateral contact"
                            && patch.part == join.part && patch.side == join.branch
                            && station > patch.first && station < patch.last;
       if (!cap && !lateral)
       {
         trimmed.Add(patch.face);
-        trimInputs.emplace_back(patch.face, std::string(patch.kind) + " part="
-                                + std::to_string(patch.part) + " side=" + std::to_string(patch.side)
-                                + " range=[" + std::to_string(patch.first) + ","
-                                + std::to_string(patch.last) + "]");
+        trimInputs.emplace_back(patch.face,
+                                std::string(patch.kind) + " part=" + std::to_string(patch.part)
+                                  + " side=" + std::to_string(patch.side) + " range=["
+                                  + std::to_string(patch.first) + "," + std::to_string(patch.last)
+                                  + "]");
         continue;
       }
-      const auto support = BRep_Tool::Surface(patch.face);
+      const auto support  = BRep_Tool::Surface(patch.face);
       const auto makePart = [&](double u0, double u1, double t0, double t1) {
         BRepBuilderAPI_MakeFace face(support, u0, u1, t0, t1, Precision::Confusion());
         if (!face.IsDone())
@@ -1389,10 +1461,12 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
         trimInputs.emplace_back(face.Face(), cap ? "trimmed front chord" : "trimmed lateral");
         return face.Face();
       };
-      const auto addTransition = [&](const std::vector<gp_Pnt2d>& boundary, double outerU,
-                                     const char* label, double splitTime = -1.0) {
+      const auto addTransition = [&](const std::vector<gp_Pnt2d>& boundary,
+                                     double                       outerU,
+                                     const char*                  label,
+                                     double                       splitTime = -1.0) {
         BRepBuilderAPI_MakeWire wire;
-        const auto addCurve = [&](int a, int b) {
+        const auto              addCurve = [&](int a, int b) {
           const auto points = occ::handle<NCollection_HArray1<gp_Pnt2d>>(
             new NCollection_HArray1<gp_Pnt2d>(1, b - a + 1));
           for (int i = a; i <= b; ++i)
@@ -1442,15 +1516,15 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
       {
         lateralSupport = support;
         lateralU = std::acos(1.0 - 2.0 * (station - patch.first) / (patch.last - patch.first)) / pi;
-        lateralStrip = makePart(capAtLowU ? lateralU : 0.0, capAtLowU ? 1.0 : lateralU,
-                                0.0, angle - join.lag);
+        lateralStrip =
+          makePart(capAtLowU ? lateralU : 0.0, capAtLowU ? 1.0 : lateralU, 0.0, angle - join.lag);
         if (join.finalBoundary.size() != 33)
           throw Standard_Failure("Final wheel trim curve is incomplete");
         auto boundary = join.finalBoundary;
         for (auto& sample : boundary)
         {
           const double profileStation = 0.5 * (1.0 - std::cos(pi * sample.X()));
-          const double interval = (profileStation - patch.first) / (patch.last - patch.first);
+          const double interval       = (profileStation - patch.first) / (patch.last - patch.first);
           if (interval < 0.0 || interval > 1.0)
             throw Standard_Failure("Final wheel trim crosses a lateral patch boundary");
           sample.SetX(std::acos(1.0 - 2.0 * interval) / pi);
@@ -1463,13 +1537,14 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
     for (int i = 0; i <= 128; ++i)
     {
       const double t = (angle - join.lag) * i / 128.0;
-      maxGap = std::max(maxGap, capSupport->Value(join.capU, join.lag + t)
-                                 .Distance(lateralSupport->Value(lateralU, t)));
+      maxGap         = std::max(
+        maxGap,
+        capSupport->Value(join.capU, join.lag + t).Distance(lateralSupport->Value(lateralU, t)));
     }
     trimmed.Perform();
     const auto& capImage = trimmed.IsModified(capStrip) ? trimmed.Modified(capStrip) : capStrip;
-    const auto& lateralImage = trimmed.IsModified(lateralStrip)
-                              ? trimmed.Modified(lateralStrip) : lateralStrip;
+    const auto& lateralImage =
+      trimmed.IsModified(lateralStrip) ? trimmed.Modified(lateralStrip) : lateralStrip;
     int shared = 0;
     for (TopExp_Explorer first(capImage, TopAbs_EDGE); first.More(); first.Next())
       for (TopExp_Explorer last(lateralImage, TopAbs_EDGE); last.More(); last.Next())
@@ -1477,24 +1552,25 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
           ++shared;
     if (shared != 1 || maxGap > tolerance)
       throw Standard_Failure("Front cap and lateral faces did not share the helical trim edge");
-    const auto& shell = trimmed.SewedShape();
+    const auto&                             shell = trimmed.SewedShape();
     std::array<std::vector<TopoDS_Edge>, 2> endpointLoops;
-    TopoDS_Edge oldStartCap, oldStartBand, newStartCap, newStartBand;
-    TopoDS_Face startCap, startBand;
-    TopoDS_Shape endCapResult, oldEndCap;
+    TopoDS_Edge                             oldStartCap, oldStartBand, newStartCap, newStartBand;
+    TopoDS_Face                             startCap, startBand;
+    TopoDS_Shape                            endCapResult, oldEndCap;
     for (int i = 1; i <= trimmed.NbFreeEdges(); ++i)
     {
       const auto& free = trimmed.FreeEdge(i);
-      double from, to;
-      const auto curve = BRep_Tool::Curve(free, from, to);
+      double      from, to;
+      const auto  curve = BRep_Tool::Curve(free, from, to);
       if (!curve.IsNull())
       {
         double startPlane = 0.0, endPlane = 0.0;
         for (int k = 0; k <= 64; ++k)
         {
           const auto point = curve->Value(from + (to - from) * k / 64.0);
-          startPlane = std::max(startPlane, std::abs(gp_Vec(base, point).Dot(axis) - width));
-          endPlane = std::max(endPlane, std::abs(gp_Vec(base, pose(point, -angle)).Dot(axis) - width));
+          startPlane       = std::max(startPlane, std::abs(gp_Vec(base, point).Dot(axis) - width));
+          endPlane =
+            std::max(endPlane, std::abs(gp_Vec(base, pose(point, -angle)).Dot(axis) - width));
         }
         if (startPlane < tolerance * 0.2)
           endpointLoops[0].push_back(TopoDS::Edge(free));
@@ -1516,12 +1592,12 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
             if (label.rfind("front cap", 0) == 0 && label.find("side=0") != std::string::npos)
             {
               oldStartCap = TopoDS::Edge(free);
-              startCap = support;
+              startCap    = support;
             }
             if (label.rfind("endpoint band", 0) == 0 && label.find("side=0") != std::string::npos)
             {
               oldStartBand = TopoDS::Edge(free);
-              startBand = support;
+              startBand    = support;
             }
             if (label == "initial-wheel front chord")
             {
@@ -1539,20 +1615,21 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
       const auto& loop = endpointLoops[end];
       if (loop.size() != (end ? 2 : 3))
         continue;
-      const auto cap = std::find_if(inputPatches.begin(), inputPatches.end(), [&](const auto& patch) {
-        return std::string_view(patch.kind) == "front cap" && patch.side == end;
-      });
+      const auto cap =
+        std::find_if(inputPatches.begin(), inputPatches.end(), [&](const auto& patch) {
+          return std::string_view(patch.kind) == "front cap" && patch.side == end;
+        });
       if (cap == inputPatches.end())
         continue;
       const BRepAdaptor_Surface support(cap->face);
-      const gp_Pln plane = support.Plane();
+      const gp_Pln              plane = support.Plane();
       // Intersect the loop with a transverse line midway between its furthest
       // endpoints. Testing the point between the crossings reveals whether
       // this loop needs a cap addition or a cap subtraction.
       std::vector<gp_Pnt> corners;
       for (const auto& edge : loop)
       {
-        double first, last;
+        double     first, last;
         const auto curve = BRep_Tool::Curve(edge, first, last);
         corners.push_back(curve->Value(first));
         corners.push_back(curve->Value(last));
@@ -1563,17 +1640,19 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
         for (const auto& last : corners)
           if (first.SquareDistance(last) > diameter)
           {
-            a = first;
-            b = last;
+            a        = first;
+            b        = last;
             diameter = first.SquareDistance(last);
           }
-      const gp_Vec across(a, b);
+      const gp_Vec        across(a, b);
       std::vector<gp_Pnt> crossings;
       for (const auto& edge : loop)
       {
-        double lo, hi;
+        double     lo, hi;
         const auto curve = BRep_Tool::Curve(edge, lo, hi);
-        const auto value = [&](double t) { return gp_Vec(a, curve->Value(t)).Dot(across) - diameter / 2; };
+        const auto value = [&](double t) {
+          return gp_Vec(a, curve->Value(t)).Dot(across) - diameter / 2;
+        };
         const bool sign = value(lo) < 0.0;
         if (sign == (value(hi) < 0.0))
           continue;
@@ -1593,14 +1672,14 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
         BRepClass_FaceClassifier classify(cap->face, mid, 1e-7);
         if (end && classify.State() == TopAbs_IN)
         {
-          const auto planeSurface = occ::handle<Geom_Plane>(new Geom_Plane(plane));
+          const auto              planeSurface = occ::handle<Geom_Plane>(new Geom_Plane(plane));
           BRepBuilderAPI_MakeWire wire;
           for (const auto& edge : loop)
           {
-            double first, last;
+            double     first, last;
             const auto curve = BRep_Tool::Curve(edge, first, last);
-            const auto projected = GeomProjLib::ProjectOnPlane(
-              curve, planeSurface, plane.Axis().Direction(), true);
+            const auto projected =
+              GeomProjLib::ProjectOnPlane(curve, planeSurface, plane.Axis().Direction(), true);
             if (projected.IsNull())
               throw Standard_Failure("Final cap trim could not be projected");
             wire.Add(BRepBuilderAPI_MakeEdge(projected, first, last).Edge());
@@ -1610,11 +1689,12 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
           BRepBuilderAPI_MakeFace region(plane, wire.Wire(), true);
           if (!region.IsDone() || !BRepCheck_Analyzer(region.Face()).IsValid())
             throw Standard_Failure("Final cap trim region is invalid");
-          const auto& oldEnd = trimmed.IsModified(cap->face) ? trimmed.Modified(cap->face) : cap->face;
+          const auto& oldEnd =
+            trimmed.IsModified(cap->face) ? trimmed.Modified(cap->face) : cap->face;
           BRepAlgoAPI_Cut subtract(oldEnd, region.Face());
           if (subtract.HasErrors() || subtract.Shape().IsNull())
             throw Standard_Failure("Final cap trim subtraction failed");
-          oldEndCap = oldEnd;
+          oldEndCap    = oldEnd;
           endCapResult = subtract.Shape();
         }
       }
@@ -1623,15 +1703,15 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
         || newStartCap.IsNull() || newStartBand.IsNull() || oldEndCap.IsNull())
       throw Standard_Failure("Could not identify both start rim trim loops");
     const auto commonPoint = [](const TopoDS_Edge& a, const TopoDS_Edge& b) {
-      double a0, a1, b0, b1;
+      double     a0, a1, b0, b1;
       const auto ca = BRep_Tool::Curve(a, a0, a1), cb = BRep_Tool::Curve(b, b0, b1);
-      double distance = 1e100;
-      gp_Pnt result;
+      double     distance = 1e100;
+      gp_Pnt     result;
       for (const double u : {a0, a1})
         for (const double v : {b0, b1})
           if (ca->Value(u).SquareDistance(cb->Value(v)) < distance)
           {
-            result = ca->Value(u);
+            result   = ca->Value(u);
             distance = result.SquareDistance(cb->Value(v));
           }
       if (distance > 1e-10)
@@ -1645,37 +1725,38 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
       const gp_Vec v(center, point);
       return (v - axis * v.Dot(axis)).Normalized();
     };
-    const auto from = radial(oldRim), to = radial(newRim);
-    const double rimAngle = from.AngleWithRef(to, axis);
+    const auto    from = radial(oldRim), to = radial(newRim);
+    const double  rimAngle = from.AngleWithRef(to, axis);
     const gp_Circ circle(gp_Ax2(center, gp_Dir(axis), gp_Dir(from)), frontFaceRadius);
-    const auto rim = BRepBuilderAPI_MakeEdge(circle, std::min(0.0, rimAngle),
-                                            std::max(0.0, rimAngle)).Edge();
-    const auto subtractStart = [&](const TopoDS_Face& face, const TopoDS_Edge& oldEdge,
+    const auto    rim =
+      BRepBuilderAPI_MakeEdge(circle, std::min(0.0, rimAngle), std::max(0.0, rimAngle)).Edge();
+    const auto subtractStart = [&](const TopoDS_Face& face,
+                                   const TopoDS_Edge& oldEdge,
                                    const TopoDS_Edge& newEdge) {
-      const auto support = BRep_Tool::Surface(face);
+      const auto              support = BRep_Tool::Surface(face);
       BRepBuilderAPI_MakeWire wire;
       for (const auto& edge : {oldEdge, newEdge, rim})
       {
-        double first, last, fitTolerance = 1e-6;
-        const auto curve = BRep_Tool::Curve(edge, first, last);
-        auto projected = edge.IsSame(oldEdge)
-                         ? BRep_Tool::CurveOnSurface(edge, face, first, last)
-                         : GeomProjLib::Curve2d(curve, first, last, support, fitTolerance);
+        double     first, last, fitTolerance = 1e-6;
+        const auto curve     = BRep_Tool::Curve(edge, first, last);
+        auto       projected = edge.IsSame(oldEdge)
+                                 ? BRep_Tool::CurveOnSurface(edge, face, first, last)
+                                 : GeomProjLib::Curve2d(curve, first, last, support, fitTolerance);
         if (projected.IsNull())
         {
           constexpr int samples = 25;
-          const auto points = occ::handle<NCollection_HArray1<gp_Pnt2d>>(
+          const auto    points  = occ::handle<NCollection_HArray1<gp_Pnt2d>>(
             new NCollection_HArray1<gp_Pnt2d>(1, samples));
-          const auto parameters = occ::handle<NCollection_HArray1<double>>(
-            new NCollection_HArray1<double>(1, samples));
+          const auto parameters =
+            occ::handle<NCollection_HArray1<double>>(new NCollection_HArray1<double>(1, samples));
           double u0, u1, v0, v1;
           BRepTools::UVBounds(face, u0, u1, v0, v1);
           fitTolerance = 0.0;
           for (int i = 1; i <= samples; ++i)
           {
             const double t = first + (last - first) * (i - 1.0) / (samples - 1.0);
-            GeomAPI_ProjectPointOnSurf project(curve->Value(t), support, u0 - 0.01, u1 + 0.01,
-                                               v0 - 0.01, v1 + 0.01, 1e-9);
+            GeomAPI_ProjectPointOnSurf
+              project(curve->Value(t), support, u0 - 0.01, u1 + 0.01, v0 - 0.01, v1 + 0.01, 1e-9);
             if (!project.NbPoints())
               throw Standard_Failure("Cannot project a rounded-rim trim sample");
             double u, v;
@@ -1694,7 +1775,8 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
         }
         const auto projectedEdge = BRepBuilderAPI_MakeEdge(projected, support, first, last).Edge();
         BRep_Builder builder;
-        for (TopExp_Explorer vertices(projectedEdge, TopAbs_VERTEX); vertices.More(); vertices.Next())
+        for (TopExp_Explorer vertices(projectedEdge, TopAbs_VERTEX); vertices.More();
+             vertices.Next())
           builder.UpdateVertex(TopoDS::Vertex(vertices.Current()), tolerance * 0.1);
         wire.Add(projectedEdge);
         if (!wire.IsDone())
@@ -1712,8 +1794,8 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
         throw Standard_Failure("Start cap or rounded-band subtraction failed");
       return cut.Shape();
     };
-    const auto capResult = subtractStart(startCap, oldStartCap, newStartCap);
-    const auto bandResult = subtractStart(startBand, oldStartBand, newStartBand);
+    const auto            capResult  = subtractStart(startCap, oldStartCap, newStartCap);
+    const auto            bandResult = subtractStart(startBand, oldStartBand, newStartBand);
     BRepBuilderAPI_Sewing closed(0.8 * tolerance);
     for (TopExp_Explorer faces(shell, TopAbs_FACE); faces.More(); faces.Next())
       if (!faces.Current().IsSame(startCap) && !faces.Current().IsSame(startBand)
@@ -1727,7 +1809,7 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
     if (!result.IsNull() && result.ShapeType() == TopAbs_SHELL && closed.NbFreeEdges() == 0
         && closed.NbMultipleEdges() == 0)
     {
-      auto solid = BRepBuilderAPI_MakeSolid(TopoDS::Shell(result)).Solid();
+      auto       solid = BRepBuilderAPI_MakeSolid(TopoDS::Shell(result)).Solid();
       const bool valid = BRepLib::OrientClosedSolid(solid) && BRepCheck_Analyzer(solid).IsValid();
       if (valid)
         return solid;
@@ -1770,9 +1852,12 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
     }
   }
 
-
-  void addEndpointPatch(BRepBuilderAPI_Sewing& sewing, int part, double a, double b,
-                        bool last, bool hasContact)
+  void addEndpointPatch(BRepBuilderAPI_Sewing& sewing,
+                        int                    part,
+                        double                 a,
+                        double                 b,
+                        bool                   last,
+                        bool                   hasContact)
   {
     PatchCollector collector(Precision::Confusion());
     addEndpointBand(collector, part, a, b, last, hasContact);
@@ -1784,8 +1869,8 @@ struct IntersectingScrewEnvelope : ScrewEnvelope
   {
     validateMeridian();
     BRepBuilderAPI_Sewing sewing(0.8 * tolerance);
-    int count = 0;
-    double worst = 0.0;
+    int                   count = 0;
+    double                worst = 0.0;
     for (int part = 0; part < static_cast<int>(bands.size()); ++part)
     {
       std::vector<double> boundaries{0.0};

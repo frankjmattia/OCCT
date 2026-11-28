@@ -7,4 +7,5 @@ set(OCCT_TKBool_GTests_FILES
   BRepAlgoAPI_Section_Test.cxx
   BRepFill_PipeShell_Test.cxx
   BRepSolidSweep_OrbitIntervals_Test.cxx
+  BRepSolidSweep_ChordFit_Test.cxx
 )

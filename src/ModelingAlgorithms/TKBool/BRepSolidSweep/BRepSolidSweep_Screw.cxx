@@ -12,6 +12,7 @@
 // Alternatively, this file may be used under the terms of Open CASCADE
 // commercial license or contractual agreement.
 
+#include "BRepSolidSweep_ChordFit.hxx"
 #include "BRepSolidSweep_OrbitIntervals.hxx"
 #include <BRepSolidSweep_Sweep.hxx>
 #include <BRepAdaptor_Curve.hxx>
@@ -69,8 +70,36 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <utility>
 #include <vector>
+
+namespace
+{
+BRepSolidSweep::ScrewStationSchedule gScrewSchedule =
+  BRepSolidSweep::ScrewStationSchedule::Curvature;
+std::vector<BRepSolidSweep::ScrewPatchFit> gScrewFits;
+} // namespace
+
+void BRepSolidSweep::SetScrewStationSchedule(ScrewStationSchedule theSchedule)
+{
+  gScrewSchedule = theSchedule;
+}
+
+BRepSolidSweep::ScrewStationSchedule BRepSolidSweep::ActiveScrewStationSchedule()
+{
+  return gScrewSchedule;
+}
+
+void BRepSolidSweep::ClearScrewPatchFits()
+{
+  gScrewFits.clear();
+}
+
+const std::vector<BRepSolidSweep::ScrewPatchFit>& BRepSolidSweep::ScrewPatchFits()
+{
+  return gScrewFits;
+}
 
 namespace
 {
@@ -101,13 +130,16 @@ gp_Circ readDisk(const TopoDS_Face& theFace)
   {
     throw Standard_ConstructionError("Expected a circular end cap");
   }
+
   const BRepAdaptor_Curve curve(TopoDS::Edge(edges.Current()));
+
   edges.Next();
   if (edges.More() || curve.GetType() != GeomAbs_Circle
       || std::abs(curve.LastParameter() - curve.FirstParameter() - 2.0 * pi) > Precision::Angular())
   {
     throw Standard_ConstructionError("Expected a disk cap without a bore");
   }
+
   return curve.Circle();
 }
 
@@ -150,11 +182,13 @@ AxisymmetricBody readBody(const TopoDS_Solid&                      theSolid,
       default:
         throw Standard_ConstructionError("Unsupported side face on axisymmetric solid");
     }
+
     if (std::abs(surface.LastUParameter() - surface.FirstUParameter() - 2.0 * pi)
         > Precision::Angular())
     {
       throw Standard_ConstructionError("Expected complete revolved side faces");
     }
+
     bands.push_back({aFace, axis, radius});
   }
   if (bands.empty() || caps.size() != 2)
@@ -644,6 +678,66 @@ struct ScrewEnvelope
     sewing.Add(face.Face());
   }
 
+  double meridianRadius(int part) const
+  {
+    if (bands[part].Surface->GetType() == GeomAbs_Torus)
+      return bands[part].Surface->Torus().MinorRadius();
+    return std::numeric_limits<double>::infinity();
+  }
+
+  double meridianArcLength(int part, double a, double b) const
+  {
+    const double span = std::abs(meridianParameter(part, b) - meridianParameter(part, a));
+    if (bands[part].Surface->GetType() == GeomAbs_Torus)
+      return span * bands[part].Surface->Torus().MinorRadius();
+    return span;
+  }
+
+  int contactMeridianIntervals(int part, double a, double b, int branch, double tolerance)
+  {
+    constexpr int aSamples = 16;
+    gp_Pnt        aPoints[aSamples + 1];
+    for (int i = 0; i <= aSamples; ++i)
+      aPoints[i] = contact(part, a, b, branch, static_cast<double>(i) / aSamples);
+
+    double aLength   = 0.0;
+    double aTightest = std::numeric_limits<double>::infinity();
+    for (int i = 1; i < aSamples; ++i)
+    {
+      const double aSide = aPoints[i - 1].Distance(aPoints[i]);
+      const double bSide = aPoints[i].Distance(aPoints[i + 1]);
+      const double cSide = aPoints[i - 1].Distance(aPoints[i + 1]);
+      aLength += aSide;
+      const gp_Vec aAcross(aPoints[i - 1], aPoints[i]);
+      const gp_Vec bAcross(aPoints[i - 1], aPoints[i + 1]);
+      const double aArea = aAcross.Crossed(bAcross).Magnitude();
+      if (aArea <= 1.0e-18 || aSide <= Precision::Confusion() || bSide <= Precision::Confusion()
+          || cSide <= Precision::Confusion())
+        continue;
+      aTightest = std::min(aTightest, aSide * bSide * cSide / (2.0 * aArea));
+    }
+    aLength += aPoints[aSamples - 1].Distance(aPoints[aSamples]);
+    return BRepSolidSweep::ChordIntervals(aLength, aTightest, tolerance);
+  }
+
+  int screwIntervals(int part, double a, double b, int branch, double tolerance)
+  {
+    int count = 1;
+    for (int i = 0; i <= 4; ++i)
+    {
+      const gp_Pnt point = contact(part, a, b, branch, i / 4.0);
+      const gp_Vec from(rotation.Location(), point);
+      const double axial  = from.Dot(vertical);
+      const double rho    = (from - axial * vertical).Magnitude();
+      const double speed  = std::hypot(rho, rise);
+      const double arc    = std::abs(angle) * speed;
+      const double radius = rho > Precision::Confusion() ? (rho * rho + rise * rise) / rho
+                                                         : std::numeric_limits<double>::infinity();
+      count               = std::max(count, BRepSolidSweep::ChordIntervals(arc, radius, tolerance));
+    }
+    return count;
+  }
+
   void addInterval(BRepBuilderAPI_Sewing& sewing,
                    int                    part,
                    double                 a,
@@ -651,43 +745,98 @@ struct ScrewEnvelope
                    int&                   count,
                    double                 tolerance)
   {
+    const bool useCurvature    = gScrewSchedule == BRepSolidSweep::ScrewStationSchedule::Curvature;
+    const int  uniformMeridian = 32;
+    const int  uniformScrew    = std::max(timeIntervals, 1);
     for (int branch : {-1, 1})
     {
-      const auto pointAt  = [&](double u) { return contact(part, a, b, branch, u); };
-      bool       accepted = false;
-      for (int stations = 32, steps = timeIntervals, attempt = 0; attempt < 4;
-           stations *= 2, steps *= 2, ++attempt)
+      const auto pointAt         = [&](double u) { return contact(part, a, b, branch, u); };
+      const int  surfaceMeridian = BRepSolidSweep::ChordIntervals(meridianArcLength(part, a, b),
+                                                                  meridianRadius(part),
+                                                                  tolerance);
+      const int  contactMeridian = contactMeridianIntervals(part, a, b, branch, tolerance);
+      // A toroidal corner spends points from its minor radius. A straight face
+      // has infinite surface radius, so the contact curve supplies the radius.
+      const int proposedMeridian = !useCurvature                         ? uniformMeridian
+                                   : std::isfinite(meridianRadius(part)) ? surfaceMeridian
+                                                                         : contactMeridian;
+      const int proposedScrew =
+        useCurvature ? screwIntervals(part, a, b, branch, tolerance) : uniformScrew;
+      const int meridianCap = uniformMeridian * 8;
+      const int screwCap    = uniformScrew * 8;
+      int       stations    = std::clamp(proposedMeridian, 1, meridianCap);
+      int       steps       = std::clamp(proposedScrew, 1, screwCap);
+      bool      accepted    = false;
+      for (int attempt = 0; attempt < 12 && !accepted; ++attempt)
       {
-        const auto uPoles = hermite(1.0, stations, [&](double u) {
+        const auto uPoles    = hermite(1.0, stations, [&](double u) {
           const double delta = 1e-4;
           const double lo = std::max(0.0, u - delta), hi = std::min(1.0, u + delta);
           return Sample{pointAt(u), gp_Vec(pointAt(lo), pointAt(hi)) / (hi - lo)};
         });
-        const auto patch  = surface(1.0, stations, 3, angle, steps, 3, [&](int i) {
+        const auto patch     = surface(1.0, stations, 3, angle, steps, 3, [&](int i) {
           return hermite(angle, steps, [&](double t) { return moving(uPoles[i], t); });
         });
-        // Compare the fitted patch to the continuous contact law between knots.
-        double worst = 0.0;
-        for (int i = 0; i < 3 * stations && worst <= tolerance; ++i)
-        {
-          const double u     = (i + 0.5) / (3.0 * stations);
-          const auto   point = pointAt(u);
-          for (int j = 0; j < steps; ++j)
+        const auto deviation = [&](int uCount, int tCount, bool stopAtTolerance) {
+          double worst = 0.0;
+          for (int i = 0; i < uCount; ++i)
           {
-            const double t = angle * (j + 0.5) / steps;
-            worst          = std::max(worst, pose(point, t).Distance(patch->Value(u, t)));
+            const double u     = (i + 0.5) / static_cast<double>(uCount);
+            const gp_Pnt point = pointAt(u);
+            for (int j = 0; j < tCount; ++j)
+            {
+              const double t = angle * (j + 0.5) / static_cast<double>(tCount);
+              worst          = std::max(worst, pose(point, t).Distance(patch->Value(u, t)));
+              if (stopAtTolerance && worst > tolerance)
+                return worst;
+            }
           }
-        }
-        if (worst > tolerance)
+          return worst;
+        };
+        // Mid-knot samples are the historical gate. The dense probe visits
+        // points that grid does not, and is required for a curvature guess.
+        const double coarse = deviation(3 * stations, steps, true);
+        if (coarse > tolerance)
+        {
+          const int nextStations = std::min(stations * 2, meridianCap);
+          const int nextSteps    = std::min(steps * 2, screwCap);
+          if (nextStations == stations && nextSteps == steps)
+            break;
+          stations = nextStations;
+          steps    = nextSteps;
           continue;
+        }
+        const double dense = deviation(8 * stations, 4 * steps, useCurvature);
+        if (useCurvature && dense > tolerance)
+        {
+          const int nextStations = std::min(stations * 2, meridianCap);
+          const int nextSteps    = std::min(steps * 2, screwCap);
+          if (nextStations == stations && nextSteps == steps)
+            break;
+          stations = nextStations;
+          steps    = nextSteps;
+          continue;
+        }
 
         BRepBuilderAPI_MakeFace face(patch, 1.0e-7);
         if (!face.IsDone() || !BRepCheck_Analyzer(face.Face()).IsValid())
           throw Standard_Failure("Could not build a valid screw envelope patch");
         sewing.Add(face.Face());
         ++count;
+        gScrewFits.push_back(
+          BRepSolidSweep::ScrewPatchFit{static_cast<int>(bands[part].Surface->GetType()),
+                                        surfaceMeridian,
+                                        contactMeridian,
+                                        proposedMeridian,
+                                        proposedScrew,
+                                        uniformMeridian,
+                                        uniformScrew,
+                                        attempt + 1,
+                                        stations,
+                                        steps,
+                                        coarse,
+                                        dense});
         accepted = true;
-        break;
       }
       if (!accepted)
         throw Standard_ConstructionError("Screw envelope missed the sampled fit tolerance");
@@ -770,6 +919,7 @@ TopoDS_Solid BRepSolidSweep_BuildContactEnvelope(
 
 TopoDS_Solid BRepSolidSweep_Sweep::Sweep(const TopoDS_Solid& theSolid, const ScrewMotion& theMotion)
 {
+  BRepSolidSweep::ClearScrewPatchFits();
   if (!std::isfinite(theMotion.Angle) || theMotion.Angle < 0.0 || theMotion.Angle > 4.0 * pi
       || !std::isfinite(theMotion.AdvancePerTurn) || !std::isfinite(theMotion.SurfaceTolerance)
       || theMotion.SurfaceTolerance <= Precision::Confusion())
